@@ -1938,7 +1938,7 @@ const PrintPkgTree = struct {
     global_cache_root: Cache.Directory,
     job_queue: *const Fetch.JobQueue,
     /// To avoid printing sub-trees multiple times.
-    already_printed: std.array_hash_map.String(void),
+    already_printed: std.array_hash_map.Auto(Package.Hash, void),
     fork_set: *const Fetch.JobQueue.ForkSet,
 
     fn child(
@@ -1999,6 +1999,9 @@ const PrintPkgTree = struct {
         }
 
         try w.writeByte('\n');
+
+        const gop = try ppt.already_printed.getOrPut(ppt.arena, pkg_hash);
+        if (gop.found_existing) return;
 
         const names = child_fetch.manifest.dependencies.keys();
         for (names, child_fetch.manifest.dependencies.values(), 0..) |name, *dep, i| {
