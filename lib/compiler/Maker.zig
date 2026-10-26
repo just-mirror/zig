@@ -1357,20 +1357,13 @@ fn configure(graph: *Graph, options: ConfigureOptions) ConfigureError!ScannedCon
 
                 var fetch: Fetch = .{
                     .arena = std.heap.ArenaAllocator.init(gpa),
-                    .location = .{ .relative_path = phantom_package_root },
-                    .location_tok = 0,
-                    .hash_tok = .none,
-                    .name_tok = 0,
+                    .parent = null,
                     .name = "",
-                    .parent_specified_paths = .empty,
-                    .parent_specified_paths_tok = .none,
-                    .parent_specified_version = undefined,
-                    .parent_specified_version_tok = .none,
+                    .location = .{ .relative_path = phantom_package_root },
                     .lazy_status = .eager,
                     .unversioned = false,
                     .remote_package_root = phantom_package_root,
                     .parent_package_root = phantom_package_root,
-                    .parent_manifest_ast = null,
                     .prog_node = fetch_prog_node,
                     .job_queue = &job_queue,
                     .omit_missing_hash_error = true,
@@ -1387,7 +1380,6 @@ fn configure(graph: *Graph, options: ConfigureOptions) ConfigureError!ScannedCon
                     .oom_flag = false,
                     .latest_commit = null,
                     .selected_projects = .empty,
-                    .parent = null,
 
                     .cli_module = build_mod,
                 };
@@ -2241,20 +2233,13 @@ fn cmdFetch(gpa: Allocator, graph: *Graph, args: []const []const u8) !void {
 
     var fetch: Fetch = .{
         .arena = std.heap.ArenaAllocator.init(gpa),
-        .location = .{ .path_or_url = path_or_url },
-        .location_tok = 0,
-        .hash_tok = .none,
-        .name_tok = 0,
+        .parent = null,
         .name = "",
-        .parent_specified_paths = .empty,
-        .parent_specified_paths_tok = .none,
-        .parent_specified_version = undefined,
-        .parent_specified_version_tok = .none,
+        .location = .{ .path_or_url = path_or_url },
         .lazy_status = .eager,
         .unversioned = false,
         .remote_package_root = undefined,
         .parent_package_root = if (build_root_initialized) .{ .root_dir = build_root.directory } else .cwd(),
-        .parent_manifest_ast = null,
         .prog_node = root_prog_node,
         .job_queue = &job_queue,
         .omit_missing_hash_error = true,
@@ -2271,7 +2256,6 @@ fn cmdFetch(gpa: Allocator, graph: *Graph, args: []const []const u8) !void {
         .oom_flag = false,
         .latest_commit = null,
         .selected_projects = .empty,
-        .parent = null,
 
         .cli_module = null,
     };
