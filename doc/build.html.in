@@ -1096,42 +1096,17 @@ nasm<span class="sgr-0_2"> nasm-3.0.1-B_NnpQpTAAA25UxvqONakXtmj-a78PGe3xfgyDFget
     of that package's version across the dependency subtree.</p>
     <p>Taking the same example from the {#link|Version Conflicts#} section, if we add
     <code>zlib</code> also to the root project, the error disappears:</p>
-    {#code|conflict-resolution-selection/add-dep.diff#}
-<figure><figcaption class="shell-cap">Shell</figcaption><pre><samp>$ <kbd>zig build --print-tree</kbd>
-nasm<span class="sgr-0_2"> nasm-3.0.1-B_NnpSJUAABp8P_x6B1dPmYEcBVlfF06ZpyWcCvl461C</span>
-├─ nasm<span class="sgr-0_2"> N-V-__8AAEAMKAFrNesgN6ZM9sxj37fq_i7UJe5nKkLmyRJI</span>
-└─ zlib<span class="sgr-0_2"> zlib-1.3.1-ZZQ7ldENAAA7qJjUXP6E6xnRuV-jDL9dyoJFc_eb3zQ6</span> (selected: zlib-1.3.2-ZZQ7lc8NAAAHm9MDfplvwoesXvk4tVm6VCsiI8KnIbT0)
-binutils<span class="sgr-0_2"> binutils-2.45.0-SsZUiNEeAwCBfZdO2AJt-qhm3mc0xA4dmCZn7H5LMK1K</span>
-├─ binutils<span class="sgr-0_2"> N-V-__8AAA6W9hFBAXcaEDszHBBVI0IfEpYUwk8y2YtqoTBr</span>
-├─ zlib<span class="sgr-0_2"> zlib-1.3.2-ZZQ7lc8NAAAHm9MDfplvwoesXvk4tVm6VCsiI8KnIbT0</span>
-└─ zstd<span class="sgr-0_2"> zstd-1.5.7-2-KEItkAMwAADNhCbGaImKrjXjnSA51jcqEbGCA3RasVZ9</span>
-zlib<span class="sgr-0_2"> zlib-1.3.2-ZZQ7lc8NAAAHm9MDfplvwoesXvk4tVm6VCsiI8KnIbT0</span>
-</samp></pre></figure>
+    {#code|conflict-resolution-selection/build.zig.zon#}
+    {#code|conflict-resolution-selection/print-tree.zig#}
     <p>Here we can see that, while <code>nasm</code> asked for <code>zlib</code> version
     <code>1.3.1</code>, it received <code>1.3.2</code> instead.
     The unused <code>1.3.1</code> package is not fetched.</p>
     <p>However, if the selected version is less than the version needed by a package in the subtree,
     an error occurs:</p>
-    {#code|conflict-resolution-selection/add-dep-bad.diff#}
-<figure><figcaption class="shell-cap">Shell</figcaption><pre><samp>$ <kbd>zig build --configure</kbd>
-<span class="sgr-31_1">error</span><span class="sgr-0_1">: </span>zlib: selected package zlib-1.3.1-ZZQ7ldENAAA7qJjUXP6E6xnRuV-jDL9dyoJFc_eb3zQ6 fails version requirements of zlib-1.3.2-ZZQ7lc8NAAAHm9MDfplvwoesXvk4tVm6VCsiI8KnIbT0
-<span class="sgr-32_1">info</span><span class="sgr-0_1">: </span>hint: use --print-tree to visualize all package versions and hashes
-(process exited with code 1)
-</samp></pre></figure>
+    {#code|selection-bad/build.zig.zon#}
+    {#code|selection-bad/build.zig#}
     <p>This problem stands out prominently with <code>--print-tree</code>:</p>
-<figure><figcaption class="shell-cap">Shell</figcaption><pre><samp>$ <kbd>zig build --print-tree</kbd>
-nasm<span class="sgr-0_2"> nasm-3.0.1-B_NnpSJUAABp8P_x6B1dPmYEcBVlfF06ZpyWcCvl461C</span>
-├─ nasm<span class="sgr-0_2"> N-V-__8AAEAMKAFrNesgN6ZM9sxj37fq_i7UJe5nKkLmyRJI</span>
-└─ zlib<span class="sgr-0_2"> zlib-1.3.1-ZZQ7ldENAAA7qJjUXP6E6xnRuV-jDL9dyoJFc_eb3zQ6</span>
-   └─ zlib<span class="sgr-0_2"> N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o</span>
-binutils<span class="sgr-0_2"> binutils-2.45.0-SsZUiNEeAwCBfZdO2AJt-qhm3mc0xA4dmCZn7H5LMK1K</span>
-├─ binutils<span class="sgr-0_2"> N-V-__8AAA6W9hFBAXcaEDszHBBVI0IfEpYUwk8y2YtqoTBr</span>
-├─ zlib<span class="sgr-0_2"> zlib-1.3.2-ZZQ7lc8NAAAHm9MDfplvwoesXvk4tVm6VCsiI8KnIbT0</span><span class="sgr-31_0"> (selected: zlib-1.3.1-ZZQ7ldENAAA7qJjUXP6E6xnRuV-jDL9dyoJFc_eb3zQ6)</span>
-|  └─ zlib<span class="sgr-0_2"> N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o</span>
-└─ zstd<span class="sgr-0_2"> zstd-1.5.7-2-KEItkAMwAADNhCbGaImKrjXjnSA51jcqEbGCA3RasVZ9</span>
-   └─ zstd<span class="sgr-0_2"> N-V-__8AAGxifwAAGwXwvsnl_aOXFGLZTeYCu0WBhuEXr96u</span>
-zlib<span class="sgr-0_2"> zlib-1.3.1-ZZQ7ldENAAA7qJjUXP6E6xnRuV-jDL9dyoJFc_eb3zQ6</span>
-</samp></pre></figure>
+    {#code|selection-bad/print-tree.zig#}
     <p>If this problem cannot be corrected by updating the selected package to a newer version that
     supports all respective packages in the dependency tree, the other option is
     {#link|Allowing Multiple Versions to Coexist#}.</p>

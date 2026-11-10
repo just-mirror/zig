@@ -1,0 +1,21 @@
+.{
+    .dependencies = .{
+        .nasm = .{
+            .url = "git+https://github.com/allyourcodebase/nasm#f11aa6ed5a7eb339259b3439b3e47d58dba998cc",
+            .hash = "nasm-3.0.1-B_NnpSJUAABp8P_x6B1dPmYEcBVlfF06ZpyWcCvl461C",
+        },
+        .binutils = .{
+            .url = "git+https://github.com/allyourcodebase/binutils#36369b8157b962cc0ddb499280a88edfdd0eda63",
+            .hash = "binutils-2.45.0-SsZUiNEeAwCBfZdO2AJt-qhm3mc0xA4dmCZn7H5LMK1K",
+        },
+
+        // This newly added dependency is a selection: all packages with the same project id in the
+        // subtree will receive this package instead.
+        .zlib = .{
+            .url = "git+https://github.com/allyourcodebase/zlib#d3b5519d3b73616a6bfece0712f080029d2a9244",
+            .hash = "zlib-1.3.2-ZZQ7lc8NAAAHm9MDfplvwoesXvk4tVm6VCsiI8KnIbT0",
+        },
+    },
+}
+
+// syntax
