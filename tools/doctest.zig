@@ -103,7 +103,10 @@ pub fn main(init: process.Init) !void {
         const code = try parseManifest(arena, input_path, source_bytes);
         const source = stripManifest(input_path, source_bytes);
 
-        try printSourceBlock(arena, out, source, Dir.path.basename(input_path));
+        if (!code.hide_source) {
+            try printSourceBlock(arena, out, source, Dir.path.basename(input_path));
+        }
+
         try printOutput(
             io,
             arena,
@@ -450,7 +453,8 @@ fn printOutput(
             const escaped_stderr = try escapeHtml(arena, result.stderr);
             const colored_stderr = try termColor(arena, escaped_stderr);
             const escaped_stdout = try escapeHtml(arena, result.stdout);
-            try shell_out.print("\n{s}{s}\n", .{ colored_stderr, escaped_stdout });
+            const colored_stdout = try termColor(arena, escaped_stdout);
+            try shell_out.print("\n{s}{s}\n", .{ colored_stderr, colored_stdout });
         },
         .test_error => |error_match| {
             var test_args: std.ArrayList([]const u8) = .empty;
@@ -1034,6 +1038,7 @@ const Code = struct {
     link_objects: []const []const u8,
     target_str: ?[]const u8,
     link_libc: bool,
+    hide_source: bool,
     link_mode: ?std.lang.LinkMode,
     disable_cache: bool,
     just_check_syntax: bool,
@@ -1107,6 +1112,7 @@ fn parseManifest(arena: Allocator, input_path: []const u8, source_bytes: []const
     var additional_options: std.ArrayList([]const u8) = .empty;
     var target_str: ?[]const u8 = null;
     var link_libc = false;
+    var hide_source = false;
     var disable_cache = false;
     var use_llvm: ?bool = null;
 
@@ -1130,6 +1136,8 @@ fn parseManifest(arena: Allocator, input_path: []const u8, source_bytes: []const
             use_llvm = false;
         } else if (mem.eql(u8, line, "link_libc")) {
             link_libc = true;
+        } else if (mem.eql(u8, line, "hide_source")) {
+            hide_source = true;
         } else if (mem.eql(u8, line, "disable_cache")) {
             disable_cache = true;
         } else {
@@ -1144,6 +1152,7 @@ fn parseManifest(arena: Allocator, input_path: []const u8, source_bytes: []const
         .link_objects = try link_objects.toOwnedSlice(arena),
         .target_str = target_str,
         .link_libc = link_libc,
+        .hide_source = hide_source,
         .link_mode = link_mode,
         .disable_cache = disable_cache,
         .just_check_syntax = just_check_syntax,
