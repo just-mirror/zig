@@ -11,13 +11,17 @@ const block_size = @sizeOf(Header);
 /// file mode and current time for mtime.
 pub const Options = struct {
     /// File system permission mode.
-    mode: u32 = 0,
-    /// File system modification time.
+    mode: ?u32 = null,
+    /// File system modification time. The file format expects number of seconds since POSIX epoch.
+    /// Zero is a common choice to make generated tarballs more reproducible.
     mtime: u64 = 0,
 };
 
 underlying_writer: *Io.Writer,
-/// Assumed to use `/` for any path separators.
+
+/// All file paths will be prefixed with this string in the output.
+///
+/// Assumes '/' is used for any path separators.
 prefix: []const u8 = "",
 
 const Error = error{
@@ -26,17 +30,9 @@ const Error = error{
     NameTooLong,
 };
 
-/// Sets prefix for all other write* method paths.
-/// `root` is assumed to use `/` for any path separators.
-pub fn setRoot(w: *Writer, root: []const u8) Error!void {
-    if (root.len > 0)
-        try w.writeDir(root, .{});
-
-    w.prefix = root;
-}
-
-pub fn writeDir(w: *Writer, sub_path: []const u8, options: Options) Error!void {
-    try w.writeHeader(.directory, sub_path, "", 0, options);
+/// Assumes `sub_path` uses `/` for path separators.
+pub fn writeDir(writer: *Writer, sub_path: []const u8, options: Options) Error!void {
+    return writeHeader(writer.underlying_writer, .directory, .dir, writer.prefix, sub_path, "", 0, options);
 }
 
 pub const WriteFileError = Io.Writer.FileError || Error || Io.File.Reader.SizeError;
@@ -52,26 +48,26 @@ pub fn writeFileTimestamp(
 }
 
 pub fn writeFile(
-    w: *Writer,
+    writer: *Writer,
     /// Assumed to use `/` for any path separators.
     sub_path: []const u8,
     file_reader: *Io.File.Reader,
-    /// If you want to match the file format's expectations, it wants number of
-    /// seconds since POSIX epoch. Zero is also a great option here to make
+    /// The file format expects number of seconds since POSIX epoch. Zero is a common choice to make
     /// generated tarballs more reproducible.
     mtime: u64,
 ) WriteFileError!void {
+    const w = writer.underlying_writer;
     const size = try file_reader.getSize();
 
-    var header: Header = .{};
-    try w.setPath(&header, sub_path);
+    var header: Header = .{ .mode = .file };
+    try setPath(w, writer.prefix, &header, sub_path);
     try header.setSize(size);
     try header.setMtime(mtime);
     try header.updateChecksum();
 
-    try w.underlying_writer.writeAll(@ptrCast((&header)[0..1]));
-    _ = try w.underlying_writer.sendFileAll(file_reader, .unlimited);
-    try w.writePadding64(size);
+    try w.writeAll(@ptrCast((&header)[0..1]));
+    _ = try w.sendFileAll(file_reader, .unlimited);
+    try writePadding64(w, size);
 }
 
 pub const WriteFileStreamError = Error || Io.Reader.StreamError;
@@ -79,97 +75,99 @@ pub const WriteFileStreamError = Error || Io.Reader.StreamError;
 /// Writes file reading file content from `reader`. Reads exactly `size` bytes
 /// from `reader`, or returns `error.EndOfStream`.
 pub fn writeFileStream(
-    w: *Writer,
+    writer: *Writer,
     /// Assumed to use `/` for any path separators.
     sub_path: []const u8,
     size: u64,
     reader: *Io.Reader,
     options: Options,
 ) WriteFileStreamError!void {
-    try w.writeHeader(.regular, sub_path, "", size, options);
-    try reader.streamExact64(w.underlying_writer, size);
-    try w.writePadding64(size);
+    const w = writer.underlying_writer;
+    try writeHeader(w, .regular, .file, w.prefix, sub_path, "", size, options);
+    try reader.streamExact64(w, size);
+    try writePadding64(w, size);
 }
 
 /// Writes file using bytes buffer `content` for size and file content.
 pub fn writeFileBytes(
-    w: *Writer,
+    writer: *Writer,
     /// Assumed to use `/` for all path separators.
     sub_path: []const u8,
     content: []const u8,
     options: Options,
 ) Error!void {
-    try w.writeHeader(.regular, sub_path, "", content.len, options);
-    try w.underlying_writer.writeAll(content);
-    try w.writePadding(content.len);
+    const w = writer.underlying_writer;
+    try writeHeader(w, .regular, .file, writer.prefix, sub_path, "", content.len, options);
+    try w.writeAll(content);
+    try writePadding(w, content.len);
 }
 
-pub fn writeLink(w: *Writer, sub_path: []const u8, link_name: []const u8, options: Options) Error!void {
-    try w.writeHeader(.symbolic_link, sub_path, link_name, 0, options);
+pub fn writeLink(writer: *Writer, sub_path: []const u8, link_name: []const u8, options: Options) Error!void {
+    try writeHeader(writer.underlying_writer, .symbolic_link, .sym_link, writer.prefix, sub_path, link_name, 0, options);
 }
 
 fn writeHeader(
-    w: *Writer,
-    typeflag: Header.FileType,
+    w: *Io.Writer,
+    typeflag: Header.TypeFlag,
+    default_mode: Header.Mode,
+    prefix: []const u8,
     sub_path: []const u8,
     link_name: []const u8,
     size: u64,
     options: Options,
 ) Error!void {
-    var header = Header.init(typeflag);
-    try w.setPath(&header, sub_path);
+    var header: Header = .{
+        .typeflag = typeflag,
+        .mode = if (options.mode) |mode| try .init(mode) else default_mode,
+    };
+    try setPath(w, prefix, &header, sub_path);
     try header.setSize(size);
     try header.setMtime(options.mtime);
-    if (options.mode != 0)
-        try header.setMode(options.mode);
-    if (typeflag == .symbolic_link)
-        header.setLinkname(link_name) catch |err| switch (err) {
-            error.NameTooLong => try w.writeExtendedHeader(.gnu_long_link, &.{link_name}),
-            else => |e| return e,
-        };
-    try header.write(w.underlying_writer);
+    if (typeflag == .symbolic_link) header.setLinkname(link_name) catch |err| switch (err) {
+        error.NameTooLong => try writeExtendedHeader(w, .gnu_long_link, &.{link_name}),
+        else => |e| return e,
+    };
+    try header.write(w);
 }
 
-/// Writes path in posix header, if don't fit (in name+prefix; 100+155
-/// bytes) writes it in gnu extended header.
-fn setPath(w: *Writer, header: *Header, sub_path: []const u8) Error!void {
-    header.setPath(w.prefix, sub_path) catch |err| switch (err) {
+/// Sets the path field of `header`. If it does not fit (in name+prefix; 100+155 bytes) writes it in gnu
+/// extended header.
+fn setPath(w: *Io.Writer, prefix: []const u8, header: *Header, sub_path: []const u8) Error!void {
+    header.setPath(prefix, sub_path) catch |err| switch (err) {
         error.NameTooLong => {
             // write extended header
-            const buffers: []const []const u8 = if (w.prefix.len == 0)
+            const buffers: []const []const u8 = if (prefix.len == 0)
                 &.{sub_path}
             else
-                &.{ w.prefix, "/", sub_path };
-            try w.writeExtendedHeader(.gnu_long_name, buffers);
+                &.{ prefix, "/", sub_path };
+            try w.writeExtendedHeader(w, .gnu_long_name, buffers);
         },
         else => |e| return e,
     };
 }
 
-/// Writes gnu extended header: gnu_long_name or gnu_long_link.
-fn writeExtendedHeader(w: *Writer, typeflag: Header.FileType, buffers: []const []const u8) Error!void {
+/// Writes gnu_long_name or gnu_long_link.
+fn writeExtendedHeader(w: *Io.Writer, file_type: Header.TypeFlag, buffers: []const []const u8) Error!void {
     var len: usize = 0;
     for (buffers) |buf| len += buf.len;
-
-    var header: Header = .init(typeflag);
+    var header: Header = .init(file_type);
     try header.setSize(len);
-    try header.write(w.underlying_writer);
-    for (buffers) |buf|
-        try w.underlying_writer.writeAll(buf);
-    try w.writePadding(len);
+    try header.write(w);
+    for (buffers) |buf| try w.writeAll(buf);
+    try writePadding(w, len);
 }
 
-fn writePadding(w: *Writer, bytes: usize) Io.Writer.Error!void {
+fn writePadding(w: *Io.Writer, bytes: usize) Io.Writer.Error!void {
     return writePaddingPos(w, bytes % block_size);
 }
 
-fn writePadding64(w: *Writer, bytes: u64) Io.Writer.Error!void {
+fn writePadding64(w: *Io.Writer, bytes: u64) Io.Writer.Error!void {
     return writePaddingPos(w, @intCast(bytes % block_size));
 }
 
-fn writePaddingPos(w: *Writer, pos: usize) Io.Writer.Error!void {
+fn writePaddingPos(w: *Io.Writer, pos: usize) Io.Writer.Error!void {
     if (pos == 0) return;
-    try w.underlying_writer.splatByteAll(0, block_size - pos);
+    try w.splatByteAll(0, block_size - pos);
 }
 
 /// According to the specification, tar should finish with two zero blocks, but
@@ -180,38 +178,32 @@ pub fn finishPedantically(w: *Writer) Io.Writer.Error!void {
     try w.underlying_writer.splatByteAll(0, block_size * 2);
 }
 
-/// A struct that is exactly 512 bytes and matches tar file format. This is
-/// intended to be used for outputting tar files; for parsing there is
-/// `std.tar.Header`.
+/// A struct that is exactly 512 bytes and matches tar file format. This is intended to be used for
+/// outputting tar files; for parsing there is `std.tar.Header`.
+///
+/// The name, linkname, magic, uname, and gname are null-terminated character strings. All other
+/// fields are zero-filled octal numbers in ASCII. Each numeric field of width w contains w minus 1
+/// digits, and a null. Reference: https://www.gnu.org/software/tar/manual/html_node/Standard.html
 pub const Header = extern struct {
-    // This struct was originally copied from
-    // https://github.com/mattnite/tar/blob/main/src/main.zig which is MIT
-    // licensed.
-    //
-    // The name, linkname, magic, uname, and gname are null-terminated character
-    // strings. All other fields are zero-filled octal numbers in ASCII. Each
-    // numeric field of width w contains w minus 1 digits, and a null.
-    // Reference: https://www.gnu.org/software/tar/manual/html_node/Standard.html
-    // POSIX header:                                  byte offset
-    name: [100]u8 = @splat(0), //                               0
-    mode: [7:0]u8 = default_mode.file, //                     100
-    uid: [7:0]u8 = @splat(0), // unused                       108
-    gid: [7:0]u8 = @splat(0), // unused                       116
-    size: [11:0]u8 = @splat('0'), //                          124
-    mtime: [11:0]u8 = @splat('0'), //                         136
-    checksum: [7:0]u8 = @splat(' '), //                       148
-    typeflag: FileType = .regular, //                         156
-    linkname: [100]u8 = @splat(0), //                         157
-    magic: [6]u8 = .{ 'u', 's', 't', 'a', 'r', 0 }, //        257
-    version: [2]u8 = .{ '0', '0' }, //                        263
-    uname: [32]u8 = @splat(0), // unused                      265
-    gname: [32]u8 = @splat(0), // unused                      297
-    devmajor: [7:0]u8 = @splat(0), // unused                  329
-    devminor: [7:0]u8 = @splat(0), // unused                  337
-    prefix: [155]u8 = @splat(0), //                           345
-    pad: [12]u8 = @splat(0), // unused                        500
+    name: [100]u8 = @splat(0),
+    mode: Mode,
+    uid: [7:0]u8 = @splat(0),
+    gid: [7:0]u8 = @splat(0),
+    size: [11:0]u8 = @splat('0'),
+    mtime: [11:0]u8 = @splat('0'),
+    checksum: [7:0]u8 = @splat(' '),
+    typeflag: TypeFlag,
+    linkname: [100]u8 = @splat(0),
+    magic: [6]u8 = .{ 'u', 's', 't', 'a', 'r', 0 },
+    version: [2]u8 = .{ '0', '0' },
+    uname: [32]u8 = @splat(0),
+    gname: [32]u8 = @splat(0),
+    devmajor: [7:0]u8 = @splat(0),
+    devminor: [7:0]u8 = @splat(0),
+    prefix: [155]u8 = @splat(0),
+    pad: [12]u8 = @splat(0),
 
-    pub const FileType = enum(u8) {
+    pub const TypeFlag = enum(u8) {
         regular = '0',
         symbolic_link = '2',
         directory = '5',
@@ -219,24 +211,20 @@ pub const Header = extern struct {
         gnu_long_link = 'K',
     };
 
-    const default_mode = struct {
-        const file = [_:0]u8{ '0', '0', '0', '0', '6', '6', '4' }; // 0o664
-        const dir = [_:0]u8{ '0', '0', '0', '0', '7', '7', '5' }; // 0o775
-        const sym_link = [_:0]u8{ '0', '0', '0', '0', '7', '7', '7' }; // 0o777
-        const other = [_:0]u8{ '0', '0', '0', '0', '0', '0', '0' }; // 0o000
-    };
+    pub const Mode = extern struct {
+        bytes: [7:0]u8,
 
-    pub fn init(typeflag: FileType) Header {
-        return .{
-            .typeflag = typeflag,
-            .mode = switch (typeflag) {
-                .directory => default_mode.dir,
-                .symbolic_link => default_mode.sym_link,
-                .regular => default_mode.file,
-                else => default_mode.other,
-            },
-        };
-    }
+        pub const file: Mode = .{ .bytes = .{ '0', '0', '0', '0', '6', '6', '4' } };
+        pub const dir: Mode = .{ .bytes = .{ '0', '0', '0', '0', '7', '7', '5' } };
+        pub const sym_link: Mode = .{ .bytes = .{ '0', '0', '0', '0', '7', '7', '7' } };
+        pub const other: Mode = .{ .bytes = .{ '0', '0', '0', '0', '0', '0', '0' } };
+
+        pub fn init(integer: u32) error{OctalOverflow}!Mode {
+            var result: Mode = .{ .bytes = @splat('0') };
+            try octal(&result.bytes, integer);
+            return result;
+        }
+    };
 
     pub fn setSize(w: *Header, size: u64) error{OctalOverflow}!void {
         try octal(&w.size, size);
@@ -252,10 +240,6 @@ pub const Header = extern struct {
             remainder /= 8;
             if (pos == 0 and remainder > 0) return error.OctalOverflow;
         }
-    }
-
-    pub fn setMode(w: *Header, mode: u32) error{OctalOverflow}!void {
-        try octal(&w.mode, mode);
     }
 
     // Integer number of seconds since January 1, 1970, 00:00 Coordinated Universal Time.

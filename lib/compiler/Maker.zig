@@ -4036,6 +4036,9 @@ fn walkGeneratedFiles(
         .update_source_files,
         => {},
 
+        .archive => |archive| {
+            walkGeneratedFilesOne(context, archive.generated_file);
+        },
         .compile => |compile| {
             walkGeneratedFilesOne(context, compile.emit_directory.value);
             walkGeneratedFilesOne(context, compile.generated_docs.value);

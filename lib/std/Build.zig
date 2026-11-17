@@ -338,6 +338,11 @@ pub fn addOptions(b: *Build) *Step.Options {
     return Step.Options.create(b);
 }
 
+/// Create a zipfile or tarball.
+pub fn addArchive(b: *Build, options: Step.Archive.Options) *Step.Archive {
+    return Step.Archive.create(b, options);
+}
+
 pub const ExecutableOptions = struct {
     name: []const u8,
     root_module: *Module,

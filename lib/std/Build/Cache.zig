@@ -1761,6 +1761,8 @@ pub const Manifest = struct {
 
     /// Add a file or directory as a dependency of process being cached, after cache miss occurs.
     ///
+    /// The string memory pointed to by `AddDiscoveredPathOptions.discovered_path` is not captured.
+    ///
     /// See also:
     /// * `addInputPath`
     /// * `addDiscoveredDepFile`

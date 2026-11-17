@@ -504,8 +504,10 @@ pub const JobQueue = struct {
             error.WriteFailed => return file_writer.err.?,
         };
 
-        var archiver: std.tar.Writer = .{ .underlying_writer = &compress.writer };
-        archiver.prefix = pkg_hash_slice;
+        var archiver: std.tar.Writer = .{
+            .underlying_writer = &compress.writer,
+            .prefix = pkg_hash_slice,
+        };
 
         var file_read_buffer: [4096]u8 = undefined;
         var link_buf: [fs.max_path_bytes]u8 = undefined;

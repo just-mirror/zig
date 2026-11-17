@@ -18,6 +18,7 @@ const assert = std.debug.assert;
 const WebServer = @import("WebServer.zig");
 const Maker = @import("../Maker.zig");
 
+pub const Archive = @import("Step/Archive.zig");
 pub const CheckFile = @import("Step/CheckFile.zig");
 pub const Compile = @import("Step/Compile.zig");
 pub const ConfigHeader = @import("Step/ConfigHeader.zig");
@@ -91,6 +92,7 @@ const ResultCacheStatus = union(enum) {
 };
 
 pub const Extended = union(enum) {
+    archive: Archive,
     check_file: CheckFile,
     compile: Compile,
     config_header: ConfigHeader,
@@ -110,6 +112,7 @@ pub const Extended = union(enum) {
 
     pub fn init(tag: Configuration.Step.Tag) Extended {
         return switch (tag) {
+            .archive => .{ .archive = .{} },
             .check_file => .{ .check_file = .{} },
             .compile => .{ .compile = .{} },
             .config_header => .{ .config_header = .{} },

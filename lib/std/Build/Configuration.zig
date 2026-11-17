@@ -511,6 +511,7 @@ pub const Step = extern struct {
     deps: Deps.Index,
     max_rss: MaxRss,
     extended: Storage.Extended(Flags, union(Tag) {
+        archive: Archive,
         check_file: CheckFile,
         compile: Compile,
         config_header: ConfigHeader,
@@ -562,6 +563,7 @@ pub const Step = extern struct {
     };
 
     pub const Tag = enum(u5) {
+        archive,
         check_file,
         compile,
         config_header,
@@ -587,6 +589,64 @@ pub const Step = extern struct {
         pub const Flags = bitpack struct(u32) {
             tag: Tag = .top_level,
             _: u27 = 0,
+        };
+    };
+
+    pub const Archive = struct {
+        flags: @This().Flags,
+        generated_file: GeneratedFileIndex,
+        sub_path: String,
+        entries: Storage.LengthPrefixedList(Entry),
+
+        pub const Flags = bitpack struct(u32) {
+            tag: Tag = .archive,
+            format: Format,
+            sort: bool,
+            _: u22 = 0,
+        };
+
+        pub const Format = enum(u3) {
+            /// Determine the format based on sub_path extension.
+            infer,
+            /// Uncompressed tarball.
+            tar,
+            /// Tarball with gzip compression.
+            tar_gz,
+            /// Reserved, not yet implemented
+            tar_xz,
+            /// Reserved, not yet implemented
+            tar_zstd,
+            /// Reserved, not yet implemented
+            zip,
+        };
+
+        pub const Entry = struct {
+            flags: Entry.Flags,
+            /// If `dir` and `lazy_path` provided, this is the prefix prepended to each dir entry.
+            /// Otherwise, this is the entry name.
+            path: Storage.FlagOptional(.flags, .path, String),
+            lazy_path: Storage.FlagOptional(.flags, .lazy_path, LazyPath.Index),
+            /// * `link`: this is the link name
+            bytes: Storage.FlagOptional(.flags, .bytes, Bytes),
+            mode: Storage.FlagOptional(.flags, .mode, u32),
+            mtime: Storage.FlagOptional(.flags, .mtime, u64),
+
+            pub const Flags = bitpack struct(u32) {
+                tag: Entry.Tag,
+                path: bool,
+                lazy_path: bool,
+                bytes: bool,
+                mode: bool,
+                mode_copied: bool,
+                mtime: bool,
+                _: u25 = 0,
+            };
+
+            pub const Tag = enum(u2) {
+                file,
+                dir,
+                link,
+            };
         };
     };
 
