@@ -363,14 +363,11 @@ pub const Walker = struct {
         }
     };
 
-    /// After each call to this function, and on deinit(), the memory returned
-    /// from this function becomes invalid. A copy must be made in order to keep
-    /// a reference to the path.
+    /// After each call to this function, and on `deinit`, the memory returned from this function
+    /// becomes invalid.
     pub fn next(self: *Walker, io: Io) !?Walker.Entry {
-        const entry = try self.inner.next(io);
-        if (entry != null and entry.?.kind == .directory) {
-            try self.inner.enter(io, entry.?);
-        }
+        const entry = (try self.inner.next(io)) orelse return null;
+        if (entry.kind == .directory) try self.inner.enter(io, entry);
         return entry;
     }
 
