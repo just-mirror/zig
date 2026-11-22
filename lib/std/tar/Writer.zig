@@ -7,10 +7,9 @@ const testing = std.testing;
 
 const block_size = @sizeOf(Header);
 
-/// Options for writing file/dir/link. If left empty 0o664 is used for
-/// file mode and current time for mtime.
 pub const Options = struct {
-    /// File system permission mode.
+    /// File system permission mode. Null indicates to use default value, ignoring the value from
+    /// the file system.
     mode: ?u32 = null,
     /// File system modification time. The file format expects number of seconds since POSIX epoch.
     /// Zero is a common choice to make generated tarballs more reproducible.
@@ -21,7 +20,7 @@ underlying_writer: *Io.Writer,
 
 /// All file paths will be prefixed with this string in the output.
 ///
-/// Assumes '/' is used for any path separators.
+/// Path separates are assumed to be '/'.
 prefix: []const u8 = "",
 
 const Error = error{
@@ -468,6 +467,7 @@ test "write files" {
 }
 
 /// Marked `inline` to avoid unnecessary binary float, since arguments are always comptime-known.
+/// TODO Delete this as it's used only for tests
 inline fn repeatString(comptime n: usize, comptime str: []const u8) []const u8 {
     const buf: [n][str.len]u8 = @splat(str[0..str.len].*);
     return @ptrCast(&buf);

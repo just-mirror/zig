@@ -628,7 +628,6 @@ pub const Step = extern struct {
             lazy_path: Storage.FlagOptional(.flags, .lazy_path, LazyPath.Index),
             /// * `link`: this is the link name
             bytes: Storage.FlagOptional(.flags, .bytes, Bytes),
-            mode: Storage.FlagOptional(.flags, .mode, u32),
             mtime: Storage.FlagOptional(.flags, .mtime, u64),
 
             pub const Flags = bitpack struct(u32) {
@@ -636,10 +635,8 @@ pub const Step = extern struct {
                 path: bool,
                 lazy_path: bool,
                 bytes: bool,
-                mode: bool,
-                mode_copied: bool,
                 mtime: bool,
-                _: u25 = 0,
+                _: u23 = 0,
             };
 
             pub const Tag = enum(u2) {

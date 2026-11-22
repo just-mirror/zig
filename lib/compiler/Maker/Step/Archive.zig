@@ -36,9 +36,8 @@ pub fn make(
     man.hash.add(conf_archive.flags);
 
     for (conf_archive.entries.slice) |entry| {
-        man.hash.addOptional(entry.mode.get());
         man.hash.addOptional(entry.mtime.get());
-        const metadata_only = !entry.flags.mtime or entry.flags.mode_copied;
+        const metadata_only = !entry.flags.mtime;
 
         switch (entry.flags.tag) {
             .file => {
@@ -107,7 +106,7 @@ pub fn make(
         },
         .dir => {
             if (entry.lazy_path.get()) |lazy_path| {
-                const metadata_only = !entry.flags.mtime or entry.flags.mode_copied;
+                const metadata_only = !entry.flags.mtime;
                 const prefix: []const u8 = if (entry.path.get()) |p| p.slice else "";
                 const dir_path = try maker.resolveLazyPath(arena, lazy_path, step_index);
 
@@ -233,7 +232,6 @@ pub fn make(
                 .file => {
                     if (entry.bytes) |contents| {
                         archiver.writeFileBytes(entry_path, contents, .{
-                            .mode = entry.mode.get(),
                             .mtime = entry.mtime.get() orelse 0,
                         }) catch |err| switch (err) {
                             error.WriteFailed => @panic("TODO"),
@@ -245,18 +243,13 @@ pub fn make(
                         var input_file = try file_path.root_dir.handle.openFile(io, file_path.sub_path, .{});
                         defer input_file.close(io);
 
-                        var mtime: ?u64 = entry.mtime.get();
-                        var mode: ?u32 = entry.mode.get();
-
-                        if (mtime == null or entry.flags.mode_copied) {
-                            const stat = input_file.stat(io);
-                            if (mtime == null) {
-                                mtime = @intCast(stat.mtime.toSeconds());
-                            }
-                            if (entry.flags.mode_copied) {
-                                mode = stat.permissions.toMode();
-                            }
-                        }
+                        const mtime: u64 = entry.mtime.get() orelse m: {
+                            const stat = input_file.stat(io) catch |err| switch (err) {
+                                error.Canceled => |e| return e,
+                                else => |e| return step.fail("failed to stat {f}: {t}", .{ file_path, e }),
+                            };
+                            break :m @intCast(stat.mtime.toSeconds());
+                        };
 
                         var file_reader: Io.File.Reader = .init(input_file, io, &file_read_buffer);
                         archiver.writeFile(entry_path, &file_reader, mtime) catch |err| switch (err) {

@@ -22,7 +22,6 @@ pub const Entry = struct {
     path: Configuration.OptionalString = .none,
     lazy_path: ?LazyPath = null,
     bytes: ?Configuration.Bytes = null,
-    mode: ?u32,
     mtime: ?u64,
     link_name: Configuration.OptionalString = .none,
 };
@@ -57,27 +56,16 @@ pub fn create(owner: *std.Build, options: Options) *Archive {
 }
 
 pub const EntryOptions = struct {
-    /// File system permission mode.
-    mode: Mode = .default,
     /// File system modification time. The file format expects number of seconds since POSIX epoch.
     /// Zero is a common choice to make generated archives more reproducible. Null indicates to
     /// match the file being copied into the archive.
     mtime: ?u64 = 0,
-
-    pub const Mode = union(enum) {
-        /// For example 0o755 for directories, 0o666 for files.
-        default,
-        /// Choose the same value based on the file system of the copied file.
-        copied,
-        specified: u32,
-    };
 };
 
 /// Inserts the string `entry_path` into the archive as a directory.
 ///
-/// null mode and mtime are treated the same as zero.
+/// mtime is asserted to be non-null.
 pub fn addDirectoryEntry(a: *Archive, entry_path: []const u8, options: EntryOptions) void {
-    assert(options.mode != .copied); // No file being copied into the archive.
     assert(options.mtime != null); // No file being copied into the archive.
     const graph = a.step.owner.graph;
     const wc = &graph.wip_configuration;
@@ -87,24 +75,15 @@ pub fn addDirectoryEntry(a: *Archive, entry_path: []const u8, options: EntryOpti
             .path = true,
             .lazy_path = false,
             .bytes = false,
-            .mode = options.mode == .specified,
-            .mode_copied = false,
             .mtime = true,
         },
         .path = wc.addString(entry_path) catch @panic("OOM"),
-        .mode = switch (options.mode) {
-            .specified => |n| n,
-            else => null,
-        },
         .mtime = options.mtime,
     }) catch @panic("OOM");
 }
 
 /// Adds all the files from `lazy_dir`, recursively, into the archive, prefixed by `prefix`, which
 /// may be empty.
-///
-/// null mode and mtime indicate to match the values from the file system when copying into the
-/// archive.
 ///
 /// If `prefix` does not include a trailing slash, no trailing slash will be added.
 pub fn addDirectory(a: *Archive, prefix: []const u8, lazy_dir: LazyPath, options: EntryOptions) void {
@@ -116,16 +95,10 @@ pub fn addDirectory(a: *Archive, prefix: []const u8, lazy_dir: LazyPath, options
             .path = prefix.len != 0,
             .lazy_path = true,
             .bytes = false,
-            .mode = options.mode == .specified,
-            .mode_copied = options.mode == .copied,
             .mtime = options.mtime != null,
         },
         .path = if (prefix.len == 0) null else wc.addString(prefix) catch @panic("OOM"),
         .lazy_path = lazy_dir,
-        .mode = switch (options.mode) {
-            .specified => |n| n,
-            else => null,
-        },
         .mtime = options.mtime,
     }) catch @panic("OOM");
 }
@@ -141,16 +114,10 @@ pub fn addFile(a: *Archive, entry_path: []const u8, lazy_path: LazyPath, options
             .path = true,
             .lazy_path = true,
             .bytes = false,
-            .mode = options.mode == .specified,
-            .mode_copied = options.mode == .copied,
             .mtime = options.mtime != null,
         },
         .path = wc.addString(entry_path) catch @panic("OOM"),
         .lazy_path = lazy_path,
-        .mode = switch (options.mode) {
-            .specified => |n| n,
-            else => null,
-        },
         .mtime = options.mtime,
     }) catch @panic("OOM");
 }
@@ -162,7 +129,6 @@ pub fn addFileContents(
     contents: []const u8,
     options: EntryOptions,
 ) void {
-    assert(options.mode != .copied); // No file being copied into the archive.
     assert(options.mtime != null); // No file being copied into the archive.
     const graph = a.step.owner.graph;
     const wc = &graph.wip_configuration;
@@ -172,23 +138,16 @@ pub fn addFileContents(
             .path = true,
             .lazy_path = false,
             .bytes = true,
-            .mode = options.mode == .specified,
-            .mode_copied = options.mode == .copied,
             .mtime = true,
         },
         .path = wc.addString(entry_path) catch @panic("OOM"),
         .bytes = wc.addBytes(contents) catch @panic("OOM"),
-        .mode = switch (options.mode) {
-            .specified => |n| n,
-            else => null,
-        },
         .mtime = options.mtime,
     }) catch @panic("OOM");
 }
 
 /// Adds the provided contents to the archive as a file named `entry_path` inside the archive.
 pub fn addLink(a: *Archive, entry_path: []const u8, link_contents: []const u8, options: EntryOptions) void {
-    assert(options.mode != .copied); // No file being copied into the archive.
     assert(options.mtime != null); // No file being copied into the archive.
     const graph = a.step.owner.graph;
     const wc = &graph.wip_configuration;
@@ -198,16 +157,10 @@ pub fn addLink(a: *Archive, entry_path: []const u8, link_contents: []const u8, o
             .path = true,
             .lazy_path = false,
             .bytes = true,
-            .mode = options.mode == .specified,
-            .mode_copied = false,
             .mtime = true,
         },
         .path = wc.addString(entry_path) catch @panic("OOM"),
         .bytes = wc.addBytes(link_contents) catch @panic("OOM"),
-        .mode = switch (options.mode) {
-            .specified => |n| n,
-            else => null,
-        },
         .mtime = options.mtime,
     }) catch @panic("OOM");
 }
