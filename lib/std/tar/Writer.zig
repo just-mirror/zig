@@ -7,82 +7,104 @@ const testing = std.testing;
 
 const block_size = @sizeOf(Header);
 
-pub const Options = struct {
-    /// File system permission mode. Null indicates to use default value, ignoring the value from
-    /// the file system.
-    mode: ?u32 = null,
-    /// File system modification time. The file format expects number of seconds since POSIX epoch.
-    /// Zero is a common choice to make generated tarballs more reproducible.
-    mtime: u64 = 0,
-};
-
 underlying_writer: *Io.Writer,
-
 /// All file paths will be prefixed with this string in the output.
 ///
-/// Path separates are assumed to be '/'.
+/// Path separators are assumed to be '/'.
 prefix: []const u8 = "",
 
-const Error = error{
-    WriteFailed,
-    OctalOverflow,
-    NameTooLong,
+pub const WriteDirOptions = struct {
+    /// File system permission mode.
+    mode: Header.Mode = .default_dir,
+    /// File system modification time. The file format expects number of seconds since POSIX epoch.
+    /// Zero is a common choice to make generated tarballs more reproducible.
+    mtime: Header.Mtime = .zero,
 };
 
-/// Assumes `sub_path` uses `/` for path separators.
-pub fn writeDir(writer: *Writer, sub_path: []const u8, options: Options) Error!void {
-    return writeHeader(writer.underlying_writer, .directory, .dir, writer.prefix, sub_path, "", 0, options);
+pub fn writeDir(
+    writer: *Writer,
+    /// The file format uses '/' for path separators. '\\' is allowed in paths, however it is not
+    /// considered a path separator, and may cause the archive to be inaccessible on some operating
+    /// systems.
+    ///
+    /// Relative to `prefix`.
+    entry_path: []const u8,
+    options: WriteDirOptions,
+) Io.Writer.Error!void {
+    const w = writer.underlying_writer;
+    var header: Header = .{
+        .typeflag = .directory,
+        .mode = options.mode,
+        .mtime = options.mtime,
+        .size = @splat('0'),
+        .checksum = undefined,
+    };
+    try setPath(w, writer.prefix, &header, entry_path);
+    try header.write(w);
 }
 
-pub const WriteFileError = Io.Writer.FileError || Error || Io.File.Reader.SizeError;
+pub const WriteFileError = Io.Writer.FileAllError || Io.File.Reader.SizeError;
 
-pub fn writeFileTimestamp(
-    w: *Writer,
-    /// Assumed to use `/` for any path separators.
-    sub_path: []const u8,
-    file_reader: *Io.File.Reader,
-    mtime: Io.Timestamp,
-) WriteFileError!void {
-    return writeFile(w, sub_path, file_reader, @intCast(mtime.toSeconds()));
-}
+pub const WriteFileOptions = struct {
+    /// File system permission mode.
+    mode: Header.Mode = .default_file,
+    /// File system modification time. The file format expects number of seconds since POSIX epoch.
+    /// Zero is a common choice to make generated tarballs more reproducible.
+    mtime: Header.Mtime = .zero,
+};
 
 pub fn writeFile(
     writer: *Writer,
-    /// Assumed to use `/` for any path separators.
-    sub_path: []const u8,
+    /// The file format uses '/' for path separators. '\\' is allowed in paths, however it is not
+    /// considered a path separator, and may cause the archive to be inaccessible on some operating
+    /// systems.
+    ///
+    /// Relative to `prefix`.
+    entry_path: []const u8,
     file_reader: *Io.File.Reader,
-    /// The file format expects number of seconds since POSIX epoch. Zero is a common choice to make
-    /// generated tarballs more reproducible.
-    mtime: u64,
+    options: WriteFileOptions,
 ) WriteFileError!void {
     const w = writer.underlying_writer;
     const size = try file_reader.getSize();
-
-    var header: Header = .{ .mode = .file };
-    try setPath(w, writer.prefix, &header, sub_path);
-    try header.setSize(size);
-    try header.setMtime(mtime);
-    try header.updateChecksum();
-
-    try w.writeAll(@ptrCast((&header)[0..1]));
+    var header: Header = .{
+        .typeflag = .file,
+        .mode = options.mode,
+        .mtime = options.mtime,
+        .size = .initSize(size),
+        .checksum = undefined,
+    };
+    try setPath(w, writer.prefix, &header, entry_path);
+    try header.write(w);
     _ = try w.sendFileAll(file_reader, .unlimited);
     try writePadding64(w, size);
 }
 
-pub const WriteFileStreamError = Error || Io.Reader.StreamError;
+pub const WriteFileStreamError = Io.Reader.StreamError;
 
-/// Writes file reading file content from `reader`. Reads exactly `size` bytes
-/// from `reader`, or returns `error.EndOfStream`.
+/// Writes content to the archive from `reader`. Reads exactly `size` bytes from `reader`, or
+/// returns `error.EndOfStream`.
 pub fn writeFileStream(
     writer: *Writer,
-    /// Assumed to use `/` for any path separators.
-    sub_path: []const u8,
+    /// The file format uses '/' for path separators. '\\' is allowed in paths, however it is not
+    /// considered a path separator, and may cause the archive to be inaccessible on some operating
+    /// systems.
+    ///
+    /// Relative to `prefix`.
+    entry_path: []const u8,
     size: u64,
     reader: *Io.Reader,
-    options: Options,
+    options: WriteFileOptions,
 ) WriteFileStreamError!void {
     const w = writer.underlying_writer;
-    try writeHeader(w, .regular, .file, w.prefix, sub_path, "", size, options);
+    var header: Header = .{
+        .typeflag = .file,
+        .mode = options.mode,
+        .mtime = options.mtime,
+        .size = .initSize(size),
+        .checksum = undefined,
+    };
+    try setPath(w, writer.prefix, &header, entry_path);
+    try header.write(w);
     try reader.streamExact64(w, size);
     try writePadding64(w, size);
 }
@@ -90,48 +112,67 @@ pub fn writeFileStream(
 /// Writes file using bytes buffer `content` for size and file content.
 pub fn writeFileBytes(
     writer: *Writer,
-    /// Assumed to use `/` for all path separators.
-    sub_path: []const u8,
+    /// The file format uses '/' for path separators. '\\' is allowed in paths, however it is not
+    /// considered a path separator, and may cause the archive to be inaccessible on some operating
+    /// systems.
+    ///
+    /// Relative to `prefix`.
+    entry_path: []const u8,
     content: []const u8,
-    options: Options,
-) Error!void {
+    options: WriteFileOptions,
+) Io.Writer.Error!void {
     const w = writer.underlying_writer;
-    try writeHeader(w, .regular, .file, writer.prefix, sub_path, "", content.len, options);
+    var header: Header = .{
+        .typeflag = .file,
+        .mode = options.mode,
+        .mtime = options.mtime,
+        .size = .initSize(content.len),
+        .checksum = undefined,
+    };
+    try setPath(w, writer.prefix, &header, entry_path);
+    try header.write(w);
     try w.writeAll(content);
     try writePadding(w, content.len);
 }
 
-pub fn writeLink(writer: *Writer, sub_path: []const u8, link_name: []const u8, options: Options) Error!void {
-    try writeHeader(writer.underlying_writer, .symbolic_link, .sym_link, writer.prefix, sub_path, link_name, 0, options);
-}
+pub const WriteLinkOptions = struct {
+    /// File system permission mode.
+    mode: Header.Mode = .default_link,
+    /// File system modification time. The file format expects number of seconds since POSIX epoch.
+    /// Zero is a common choice to make generated tarballs more reproducible.
+    mtime: Header.Mtime = .zero,
+};
 
-fn writeHeader(
-    w: *Io.Writer,
-    typeflag: Header.TypeFlag,
-    default_mode: Header.Mode,
-    prefix: []const u8,
-    sub_path: []const u8,
+pub fn writeLink(
+    writer: *Writer,
+    /// The file format uses '/' for path separators. '\\' is allowed in paths, however it is not
+    /// considered a path separator, and may cause the archive to be inaccessible on some operating
+    /// systems.
+    ///
+    /// Relative to `prefix`.
+    entry_path: []const u8,
+    /// The contents of the link entry. Presumably a path that this link points to.
     link_name: []const u8,
-    size: u64,
-    options: Options,
-) Error!void {
+    options: WriteLinkOptions,
+) Io.Writer.Error!void {
+    const w = writer.underlying_writer;
     var header: Header = .{
-        .typeflag = typeflag,
-        .mode = if (options.mode) |mode| try .init(mode) else default_mode,
+        .typeflag = .symbolic_link,
+        .mode = options.mode,
+        .mtime = options.mtime,
+        .size = @splat('0'),
+        .checksum = undefined,
     };
-    try setPath(w, prefix, &header, sub_path);
-    try header.setSize(size);
-    try header.setMtime(options.mtime);
-    if (typeflag == .symbolic_link) header.setLinkname(link_name) catch |err| switch (err) {
+    try setPath(w, writer.prefix, &header, entry_path);
+    header.setLinkname(link_name) catch |err| switch (err) {
         error.NameTooLong => try writeExtendedHeader(w, .gnu_long_link, &.{link_name}),
-        else => |e| return e,
     };
     try header.write(w);
 }
 
 /// Sets the path field of `header`. If it does not fit (in name+prefix; 100+155 bytes) writes it in gnu
 /// extended header.
-fn setPath(w: *Io.Writer, prefix: []const u8, header: *Header, sub_path: []const u8) Error!void {
+fn setPath(w: *Io.Writer, prefix: []const u8, header: *Header, sub_path: []const u8) Io.Writer.Error!void {
     header.setPath(prefix, sub_path) catch |err| switch (err) {
         error.NameTooLong => {
             // write extended header
@@ -141,16 +182,20 @@ fn setPath(w: *Io.Writer, prefix: []const u8, header: *Header, sub_path: []const
                 &.{ prefix, "/", sub_path };
             try w.writeExtendedHeader(w, .gnu_long_name, buffers);
         },
-        else => |e| return e,
     };
 }
 
 /// Writes gnu_long_name or gnu_long_link.
-fn writeExtendedHeader(w: *Io.Writer, file_type: Header.TypeFlag, buffers: []const []const u8) Error!void {
+fn writeExtendedHeader(w: *Io.Writer, type_flag: Header.TypeFlag, buffers: []const []const u8) Io.Writer.Error!void {
     var len: usize = 0;
     for (buffers) |buf| len += buf.len;
-    var header: Header = .init(file_type);
-    try header.setSize(len);
+    var header: Header = .{
+        .typeflag = type_flag,
+        .size = .initSize(len),
+        .mode = .zero,
+        .mtime = .zero,
+        .checksum = undefined,
+    };
     try header.write(w);
     for (buffers) |buf| try w.writeAll(buf);
     try writePadding(w, len);
@@ -169,10 +214,9 @@ fn writePaddingPos(w: *Io.Writer, pos: usize) Io.Writer.Error!void {
     try w.splatByteAll(0, block_size - pos);
 }
 
-/// According to the specification, tar should finish with two zero blocks, but
-/// "reasonable system must not assume that such a block exists when reading an
-/// archive". Therefore, the Zig standard library recommends to not call this
-/// function.
+/// According to the specification, tar should finish with two zero blocks, but "reasonable system
+/// must not assume that such a block exists when reading an archive". Therefore, the Zig standard
+/// library recommends to not call this function.
 pub fn finishPedantically(w: *Writer) Io.Writer.Error!void {
     try w.underlying_writer.splatByteAll(0, block_size * 2);
 }
@@ -188,9 +232,10 @@ pub const Header = extern struct {
     mode: Mode,
     uid: [7:0]u8 = @splat(0),
     gid: [7:0]u8 = @splat(0),
-    size: [11:0]u8 = @splat('0'),
-    mtime: [11:0]u8 = @splat('0'),
-    checksum: [7:0]u8 = @splat(' '),
+    size: [11:0]u8,
+    mtime: Mtime,
+    /// Set by calling `updateChecksum` after setting all other fields.
+    checksum: [7:0]u8,
     typeflag: TypeFlag,
     linkname: [100]u8 = @splat(0),
     magic: [6]u8 = .{ 'u', 's', 't', 'a', 'r', 0 },
@@ -213,10 +258,10 @@ pub const Header = extern struct {
     pub const Mode = extern struct {
         bytes: [7:0]u8,
 
-        pub const file: Mode = .{ .bytes = .{ '0', '0', '0', '0', '6', '6', '4' } };
-        pub const dir: Mode = .{ .bytes = .{ '0', '0', '0', '0', '7', '7', '5' } };
-        pub const sym_link: Mode = .{ .bytes = .{ '0', '0', '0', '0', '7', '7', '7' } };
-        pub const other: Mode = .{ .bytes = .{ '0', '0', '0', '0', '0', '0', '0' } };
+        pub const default_file: Mode = .{ .bytes = .{ '0', '0', '0', '0', '6', '6', '4' } };
+        pub const default_dir: Mode = .{ .bytes = .{ '0', '0', '0', '0', '7', '7', '5' } };
+        pub const default_link: Mode = .{ .bytes = .{ '0', '0', '0', '0', '7', '7', '7' } };
+        pub const zero: Mode = .{ .bytes = .{ '0', '0', '0', '0', '0', '0', '0' } };
 
         pub fn init(integer: u32) error{OctalOverflow}!Mode {
             var result: Mode = .{ .bytes = @splat('0') };
@@ -225,8 +270,30 @@ pub const Header = extern struct {
         }
     };
 
-    pub fn setSize(w: *Header, size: u64) error{OctalOverflow}!void {
-        try octal(&w.size, size);
+    pub const Mtime = extern struct {
+        bytes: [11:0]u8,
+
+        /// Keeps generated tarballs reproducible.
+        pub const zero: Mtime = .{ .bytes = @splat('0') };
+
+        /// The file format expects number of seconds since POSIX epoch.
+        pub fn init(integer: u64) error{OctalOverflow}!Mtime {
+            var result: Mtime = .{ .bytes = @splat('0') };
+            try octal(&result.bytes, integer);
+            return result;
+        }
+
+        pub fn fromTimestamp(timestamp: Io.Timestamp) error{OctalOverflow}!Mtime {
+            return init(std.math.cast(u64, timestamp.toSeconds()) orelse return error.OctalOverflow);
+        }
+    };
+
+    pub fn initSize(size: u64) [11:0]u8 {
+        var result: [11:0]u8 = @splat('0');
+        octal(&result, size) catch |err| switch (err) {
+            error.OctalOverflow => @panic("TODO implement POSIX.1-2001 format aka pax to avoid this limitation"),
+        };
+        return result;
     }
 
     fn octal(buf: []u8, value: u64) error{OctalOverflow}!void {
@@ -241,29 +308,26 @@ pub const Header = extern struct {
         }
     }
 
-    // Integer number of seconds since January 1, 1970, 00:00 Coordinated Universal Time.
-    pub fn setMtime(w: *Header, mtime: u64) error{OctalOverflow}!void {
-        try octal(&w.mtime, mtime);
+    pub fn updateChecksum(header: *Header) void {
+        header.checksum = @splat(' ');
+        var checksum: usize = ' ';
+        for (@as([]const u8, @ptrCast(header))) |byte| checksum += byte;
+        octal(&header.checksum, checksum) catch |err| switch (err) {
+            error.OctalOverflow => unreachable, // Even if all bytes set, not possible.
+        };
     }
 
-    pub fn updateChecksum(w: *Header) !void {
-        var checksum: usize = ' '; // other 7 w.checksum bytes are initialized to ' '
-        for (std.mem.asBytes(w)) |val|
-            checksum += val;
-        try octal(&w.checksum, checksum);
+    pub fn write(h: *Header, writer: *Io.Writer) Io.Writer.Error!void {
+        h.updateChecksum();
+        try writer.writeAll(@ptrCast(h));
     }
 
-    pub fn write(h: *Header, bw: *Io.Writer) error{ OctalOverflow, WriteFailed }!void {
-        try h.updateChecksum();
-        try bw.writeAll(std.mem.asBytes(h));
-    }
-
-    pub fn setLinkname(w: *Header, link: []const u8) !void {
+    pub fn setLinkname(w: *Header, link: []const u8) error{NameTooLong}!void {
         if (link.len > w.linkname.len) return error.NameTooLong;
         @memcpy(w.linkname[0..link.len], link);
     }
 
-    pub fn setPath(w: *Header, prefix: []const u8, sub_path: []const u8) !void {
+    pub fn setPath(w: *Header, prefix: []const u8, sub_path: []const u8) error{NameTooLong}!void {
         const max_prefix = w.prefix.len;
         const max_name = w.name.len;
         const sep = std.fs.path.sep_posix;

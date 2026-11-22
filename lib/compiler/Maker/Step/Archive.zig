@@ -211,12 +211,13 @@ pub fn make(
         var file_write_buffer: [4096]u8 = undefined;
         var file_writer = file.writer(io, &file_write_buffer);
 
+        // TODO check for if compression is enabled
         var compress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
         var compress = std.compress.flate.Compress.init(&file_writer.interface, &compress_buffer, .gzip, .level_9) catch |err| switch (err) {
             error.WriteFailed => switch (file_writer.err.?) {
                 error.Canceled => |e| return e,
-                error.WriteFailed => |other| return step.fail(maker, "writing to {f} failed: {t}", .{
-                    out_path, other,
+                error.WriteFailed => return step.fail(maker, "writing to {f} failed: {t}", .{
+                    out_path, file_writer.err.?,
                 }),
             },
         };
@@ -234,7 +235,7 @@ pub fn make(
                         archiver.writeFileBytes(entry_path, contents, .{
                             .mtime = entry.mtime.get() orelse 0,
                         }) catch |err| switch (err) {
-                            error.WriteFailed => @panic("TODO"),
+                            error.WriteFailed => return file_writer.err.?, // TODO
                             //else => |e| @panic("TODO"),
                         };
                     } else if (entry.lazy_path) |lazy_path| {
@@ -253,13 +254,22 @@ pub fn make(
 
                         var file_reader: Io.File.Reader = .init(input_file, io, &file_read_buffer);
                         archiver.writeFile(entry_path, &file_reader, mtime) catch |err| switch (err) {
-                            error.ReadFailed => return file_reader.err.?,
-                            error.WriteFailed => return file_writer.err.?,
+                            error.ReadFailed => return file_reader.err.?, // TODO
+                            error.WriteFailed => return file_writer.err.?, // TODO
                             else => |e| return e,
                         };
                     } else unreachable;
                 },
-                .dir => {},
+                .dir => {
+                    if (entry.lazy_path) |lazy_path| {
+                        // This is the path to the base directory and the entry_path is the
+                        // sub_path.
+
+                    } else {
+                        try archiver.writeDir(entry_path, .{ .mtime = mtime });
+                    }
+                },
+                .link => @panic("TODO"),
             }
         }
 
