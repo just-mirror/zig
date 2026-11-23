@@ -524,7 +524,7 @@ pub const JobQueue = struct {
                 var file = try pkg_dir.openFile(io, entry_path, .{});
                 defer file.close(io);
                 var file_reader: Io.File.Reader = .init(file, io, &file_read_buffer);
-                archiver.writeFile(entry_path, &file_reader, 0) catch |err| switch (err) {
+                archiver.writeFile(entry_path, &file_reader, .{}) catch |err| switch (err) {
                     error.ReadFailed => return file_reader.err.?,
                     error.WriteFailed => return file_writer.err.?,
                     else => |e| return e,

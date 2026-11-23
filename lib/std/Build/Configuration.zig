@@ -596,18 +596,16 @@ pub const Step = extern struct {
         flags: @This().Flags,
         generated_file: GeneratedFileIndex,
         sub_path: String,
-        entries: Storage.LengthPrefixedList(Entry),
+        entries: Storage.LengthPrefixedList(Entry.Index),
 
         pub const Flags = bitpack struct(u32) {
             tag: Tag = .archive,
             format: Format,
             sort: bool,
-            _: u22 = 0,
+            _: u23 = 0,
         };
 
         pub const Format = enum(u3) {
-            /// Determine the format based on sub_path extension.
-            infer,
             /// Uncompressed tarball.
             tar,
             /// Tarball with gzip compression.
@@ -630,13 +628,15 @@ pub const Step = extern struct {
             bytes: Storage.FlagOptional(.flags, .bytes, Bytes),
             mtime: Storage.FlagOptional(.flags, .mtime, u64),
 
+            pub const Index = IndexType(@This());
+
             pub const Flags = bitpack struct(u32) {
                 tag: Entry.Tag,
                 path: bool,
                 lazy_path: bool,
                 bytes: bool,
                 mtime: bool,
-                _: u23 = 0,
+                _: u26 = 0,
             };
 
             pub const Tag = enum(u2) {

@@ -13,6 +13,7 @@ sub_path: Configuration.String,
 format: Configuration.Step.Archive.Format,
 // TODO account for this in the add* methods
 prefix: []const u8,
+sort: bool,
 entries: std.ArrayList(Entry),
 
 pub const base_tag: Step.Tag = .archive;
@@ -23,13 +24,13 @@ pub const Entry = struct {
     lazy_path: ?LazyPath = null,
     bytes: ?Configuration.Bytes = null,
     mtime: ?u64,
-    link_name: Configuration.OptionalString = .none,
 };
 
 pub const Options = struct {
     /// Directory components and basename of the output file within the cache.
     sub_path: []const u8,
-    format: Configuration.Step.Archive.Format = .infer,
+    /// `null` indicates to infer from `sub_path`.
+    format: ?Configuration.Step.Archive.Format = null,
     /// Directory components that will be prepended to all entries.
     prefix: []const u8 = "",
     /// Determines whether the archive's entries will be sorted bytewise by entry name, ascending.
@@ -49,8 +50,16 @@ pub fn create(owner: *std.Build, options: Options) *Archive {
         }),
         .generated_file = graph.addGeneratedFile(&a.step),
         .sub_path = wc.addString(options.sub_path) catch @panic("OOM"),
-        .format = options.format,
+        .format = options.format orelse f: {
+            if (std.mem.endsWith(u8, options.sub_path, ".tar")) break :f .tar;
+            if (std.mem.endsWith(u8, options.sub_path, ".tar.gz")) break :f .tar_gz;
+            if (std.mem.endsWith(u8, options.sub_path, ".tar.xz")) break :f .tar_xz;
+            if (std.mem.endsWith(u8, options.sub_path, ".tar.zstd")) break :f .tar_zstd;
+            if (std.mem.endsWith(u8, options.sub_path, ".zip")) break :f .zip;
+            std.debug.panic("unable to infer archive format from extension of file name {q}", .{options.sub_path});
+        },
         .prefix = options.prefix,
+        .sort = options.sort,
     };
     return a;
 }
@@ -60,6 +69,10 @@ pub const EntryOptions = struct {
     /// Zero is a common choice to make generated archives more reproducible. Null indicates to
     /// match the file being copied into the archive.
     mtime: ?u64 = 0,
+
+    fn assert(eo: *const EntryOptions) void {
+        if (eo.mtime) |mtime| std.tar.Writer.Header.Mtime.init(mtime) catch unreachable; // Invalid mtime.
+    }
 };
 
 /// Inserts the string `entry_path` into the archive as a directory.
@@ -67,6 +80,7 @@ pub const EntryOptions = struct {
 /// mtime is asserted to be non-null.
 pub fn addDirectoryEntry(a: *Archive, entry_path: []const u8, options: EntryOptions) void {
     assert(options.mtime != null); // No file being copied into the archive.
+    options.assert();
     const graph = a.step.owner.graph;
     const wc = &graph.wip_configuration;
     a.entries.append(graph.arena, .{
@@ -87,6 +101,7 @@ pub fn addDirectoryEntry(a: *Archive, entry_path: []const u8, options: EntryOpti
 ///
 /// If `prefix` does not include a trailing slash, no trailing slash will be added.
 pub fn addDirectory(a: *Archive, prefix: []const u8, lazy_dir: LazyPath, options: EntryOptions) void {
+    options.assert();
     const graph = a.step.owner.graph;
     const wc = &graph.wip_configuration;
     a.entries.append(graph.arena, .{
@@ -106,6 +121,7 @@ pub fn addDirectory(a: *Archive, prefix: []const u8, lazy_dir: LazyPath, options
 /// Adds the file contents of `lazy_path` to the archive, ignoring the file system name and using
 /// `entry_path` for the name inside the archive.
 pub fn addFile(a: *Archive, entry_path: []const u8, lazy_path: LazyPath, options: EntryOptions) void {
+    options.assert();
     const graph = a.step.owner.graph;
     const wc = &graph.wip_configuration;
     a.entries.append(graph.arena, .{
@@ -130,6 +146,7 @@ pub fn addFileContents(
     options: EntryOptions,
 ) void {
     assert(options.mtime != null); // No file being copied into the archive.
+    options.assert();
     const graph = a.step.owner.graph;
     const wc = &graph.wip_configuration;
     a.entries.append(graph.arena, .{
@@ -149,6 +166,7 @@ pub fn addFileContents(
 /// Adds the provided contents to the archive as a file named `entry_path` inside the archive.
 pub fn addLink(a: *Archive, entry_path: []const u8, link_contents: []const u8, options: EntryOptions) void {
     assert(options.mtime != null); // No file being copied into the archive.
+    options.assert();
     const graph = a.step.owner.graph;
     const wc = &graph.wip_configuration;
     a.entries.append(graph.arena, .{

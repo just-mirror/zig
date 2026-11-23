@@ -67,7 +67,7 @@ pub fn writeFile(
     const w = writer.underlying_writer;
     const size = try file_reader.getSize();
     var header: Header = .{
-        .typeflag = .file,
+        .typeflag = .regular,
         .mode = options.mode,
         .mtime = options.mtime,
         .size = Header.initSize(size),

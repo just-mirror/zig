@@ -83,6 +83,26 @@ pub fn write(root_package: *std.Build.Package, wc: *Configuration.Wip, writer: *
             });
 
             const extended: u32 = switch (step.tag) {
+                .archive => e: {
+                    const sa: *const Step.Archive = @fieldParentPtr("step", step);
+                    const entries = try arena.alloc(Configuration.Step.Archive.Entry, sa.entries.items.len);
+                    for (entries, sa.entries.items) |*dst, src| dst.* = .{
+                        .flags = src.flags,
+                        .path = .{ .value = src.path },
+                        .lazy_path = .{ .value = try s.addOptionalLazyPath(src.lazy_path) },
+                        .bytes = .{ .value = src.bytes },
+                        .mtime = .{ .value = src.mtime },
+                    };
+                    break :e try wc.addExtraErased(Configuration.Step.Archive, .{
+                        .flags = .{
+                            .format = sa.format,
+                            .sort = sa.sort,
+                        },
+                        .generated_file = sa.generated_file,
+                        .sub_path = sa.sub_path,
+                        .entries = .{ .slice = entries },
+                    });
+                },
                 .top_level => e: {
                     const top_level: *const Step.TopLevel = @fieldParentPtr("step", step);
                     break :e try wc.addExtraErased(Configuration.Step.TopLevel, .{

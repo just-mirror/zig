@@ -333,6 +333,7 @@ pub fn deinit(step: *Step, gpa: Allocator, io: Io) void {
     step.clearErrorBundle(gpa);
     step.inputs.deinit(gpa);
     switch (step.extended) {
+        .archive,
         .check_file,
         .config_header,
         .fail,

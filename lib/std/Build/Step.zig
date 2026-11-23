@@ -64,6 +64,7 @@ pub fn Type(comptime tag: Tag) type {
     };
 }
 
+pub const Archive = @import("Step/Archive.zig");
 pub const CheckFile = @import("Step/CheckFile.zig");
 pub const Compile = @import("Step/Compile.zig");
 pub const ConfigHeader = @import("Step/ConfigHeader.zig");

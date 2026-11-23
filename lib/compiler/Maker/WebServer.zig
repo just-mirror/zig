@@ -586,19 +586,15 @@ pub fn serveTarFile(ws: *WebServer, request: *http.Server.Request, paths: []cons
 
     for (paths) |path| {
         var file = path.root_dir.handle.openFile(io, path.sub_path, .{}) catch |err| {
-            log.err("failed to open '{f}': {s}", .{ path, @errorName(err) });
+            log.err("failed to open {qf}: {t}", .{ path, err });
             continue;
         };
         defer file.close(io);
-        const stat = try file.stat(io);
         var read_buffer: [1024]u8 = undefined;
-        var file_reader: Io.File.Reader = .initSize(file, io, &read_buffer, stat.size);
-
-        archiver.prefix = path.root_dir.path orelse graph.cache.cwd;
-        try archiver.writeFile(path.sub_path, &file_reader, @intCast(stat.mtime.toSeconds()));
+        var file_reader: Io.File.Reader = .init(file, io, &read_buffer);
+        try archiver.writeFile(path.sub_path, &file_reader, .{});
     }
 
-    // intentionally not calling `archiver.finishPedantically`
     try response.end();
 }
 

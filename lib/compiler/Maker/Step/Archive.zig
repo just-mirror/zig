@@ -26,6 +26,22 @@ pub fn make(
     const conf_step = step_index.ptr(conf);
     const conf_archive = conf_step.extended.get(conf.extra).archive;
 
+    const Container = enum { tar, zip };
+    const Compression = enum { none, gz, xz, zstd };
+
+    const sub_path = conf_archive.sub_path.slice(conf);
+
+    const container: Container, const compression: Compression = switch (conf_archive.flags.format) {
+        .tar => .{ .tar, .none },
+        .tar_gz => .{ .tar, .gz },
+        .tar_xz => .{ .tar, .xz },
+        .tar_zstd => .{ .tar, .zstd },
+        .zip => .{ .zip, .gz },
+    };
+
+    assert(container == .tar); // TODO implement zip
+    assert(compression == .gz); // TODO implement other kinds of compression
+
     var tmp_arena_allocator: std.heap.ArenaAllocator = .init(gpa);
     defer tmp_arena_allocator.deinit();
     const tmp_arena = tmp_arena_allocator.allocator();
@@ -33,21 +49,22 @@ pub fn make(
     var man = graph.cache.obtain();
     defer man.deinit();
 
-    man.hash.add(conf_archive.flags);
+    man.hash.add(@backingInt(conf_archive.flags));
 
-    for (conf_archive.entries.slice) |entry| {
-        man.hash.addOptional(entry.mtime.get());
+    for (conf_archive.entries.slice) |entry_index| {
+        const entry = entry_index.get(conf);
+        man.hash.addOptional(entry.mtime.value);
         const metadata_only = !entry.flags.mtime;
 
         switch (entry.flags.tag) {
             .file => {
-                const entry_path = entry.path.get().?.slice();
+                const entry_path = entry.path.value.?.slice(conf);
                 man.hash.addBytes(entry_path);
-                if (entry.bytes) |contents| {
+                if (entry.bytes.value) |contents| {
                     assert(!metadata_only);
-                    man.hash.addBytes(contents);
-                } else if (entry.lazy_path) |lazy_path| {
-                    const file_path = try maker.resolveLazyPath(arena, lazy_path, step_index);
+                    man.hash.addBytes(contents.slice(conf));
+                } else if (entry.lazy_path.value) |lazy_path| {
+                    const file_path = try maker.resolveLazyPathIndex(arena, lazy_path, step_index);
                     _ = try man.addInputPath(file_path, .{
                         .handle = .{ .file = null },
                         .metadata_only = metadata_only,
@@ -55,29 +72,27 @@ pub fn make(
                 } else unreachable;
             },
             .dir => {
-                if (entry.lazy_path.get()) |lazy_path| {
-                    if (entry.path.get()) |prefix| {
-                        man.hash.addBytes(prefix.slice);
+                if (entry.lazy_path.value) |lazy_path| {
+                    if (entry.path.value) |prefix| {
+                        man.hash.addBytes(prefix.slice(conf));
                     }
-                    const dir_path = try maker.resolveLazyPath(arena, lazy_path, step_index);
+                    const dir_path = try maker.resolveLazyPathIndex(arena, lazy_path, step_index);
                     _ = try man.addInputPath(dir_path, .{
                         .handle = .{ .dir = null },
                         .metadata_only = metadata_only,
                     });
                 } else {
-                    const entry_path = entry.path.get().?.slice();
+                    const entry_path = entry.path.value.?.slice(conf);
                     man.hash.addBytes(entry_path);
                 }
             },
             .link => {
                 assert(!metadata_only);
-                man.hash.addBytes(entry.path.get().?.slice());
-                man.hash.addBytes(entry.bytes.get().?.slice());
+                man.hash.addBytes(entry.path.value.?.slice(conf));
+                man.hash.addBytes(entry.bytes.value.?.slice(conf));
             },
         }
     }
-
-    const sub_path = conf_archive.sub_path.slice(conf);
 
     if (try step.cacheHitWatched(maker, &man, progress_node)) {
         const digest = man.hitDigestHex();
@@ -96,86 +111,92 @@ pub fn make(
     try all_entries.ensureUnusedCapacity(tmp_arena, conf_archive.entries.slice.len);
 
     // Add everything to all_entries, recursively walking the lazy directories.
-    for (conf_archive.entries.slice, 0..) |entry, i| switch (entry.flags.tag) {
-        .file => {
-            const entry_path = entry.path.get().?.slice();
-            try all_entries.append(tmp_arena, entry_path, .{
-                .index = @intCast(i),
-                .symlink = false,
-            });
-        },
-        .dir => {
-            if (entry.lazy_path.get()) |lazy_path| {
-                const metadata_only = !entry.flags.mtime;
-                const prefix: []const u8 = if (entry.path.get()) |p| p.slice else "";
-                const dir_path = try maker.resolveLazyPath(arena, lazy_path, step_index);
-
-                var dir = dir_path.root_dir.handle.openDir(dir_path.subPathOrDot(), .{
-                    .iterate = true,
-                    .follow_symlinks = false,
-                }) catch |err| switch (err) {
-                    error.OutOfMemory, error.Canceled => |e| return e,
-                    else => |e| return step.fail(maker, "opening {qf} failed: {t}", .{ dir_path, e }),
-                };
-                defer dir.close();
-
-                var walker = try dir.walk(gpa);
-                defer walker.deinit();
-
-                while (walker.next() catch |err| switch (err) {
-                    error.OutOfMemory, error.Canceled => |e| return e,
-                    else => |e| return step.fail(maker, "walking {qf} failed: {t}", .{ dir_path, e }),
-                }) |dir_entry| {
-                    const symlink = switch (dir_entry.kind) {
-                        .directory => {
-                            var diagnostic: Cache.AddDiscoveredPathDiagnostic = .none;
-                            man.addDiscoveredPath(.{
-                                .discovered_path = .{
-                                    .unresolved = try dir_path.join(tmp_arena, dir_entry.path),
-                                },
-                                .handle = .{ .dir = null },
-                                .metadata_only = metadata_only,
-                                .diagnostic = &diagnostic,
-                            }) catch |err| switch (err) {
-                                else => |e| return e,
-                                error.FileSystemFailure => {
-                                    return step.fail(maker, "tracking {qf} in cache: {f}", .{diagnostic});
-                                },
-                            };
-                            continue;
-                        },
-                        .file => false,
-                        .sym_link => true,
-                        else => return step.fail(maker, "path {qf} of type {t} cannot be stored in {t} archive", .{
-                            try dir_path.joinString(tmp_arena, entry.path), entry.kind, conf_archive.format,
-                        }),
-                    };
-                    const entry_path = try std.mem.concat(tmp_arena, u8, &.{ prefix, entry.path });
-                    // If necessary, normalize path separators to POSIX-style since the tar format requires that.
-                    if (comptime (std.fs.path.sep != std.fs.path.sep_posix)) {
-                        std.mem.replaceScalar(u8, entry_path, std.fs.path.sep, std.fs.path.sep_posix);
-                    }
-                    try all_entries.append(tmp_arena, entry_path, .{
-                        .index = @intCast(i),
-                        .symlink = symlink,
-                    });
-                }
-            } else {
-                const entry_path = entry.path.get().?.slice();
-                try all_entries.append(tmp_arena, entry_path, .{
+    for (conf_archive.entries.slice, 0..) |entry_index, i| {
+        const entry = entry_index.get(conf);
+        switch (entry.flags.tag) {
+            .file => {
+                const entry_path = entry.path.value.?.slice(conf);
+                try all_entries.put(tmp_arena, entry_path, .{
                     .index = @intCast(i),
                     .symlink = false,
                 });
-            }
-        },
-        .link => {
-            const entry_path = entry.path.get().?.slice();
-            try all_entries.append(tmp_arena, entry_path, .{
-                .index = @intCast(i),
-                .symlink = false,
-            });
-        },
-    };
+            },
+            .dir => {
+                if (entry.lazy_path.value) |lazy_path| {
+                    const metadata_only = !entry.flags.mtime;
+                    const prefix: []const u8 = if (entry.path.value) |p| p.slice(conf) else "";
+                    const dir_path = try maker.resolveLazyPathIndex(arena, lazy_path, step_index);
+
+                    var dir = dir_path.root_dir.handle.openDir(io, dir_path.subPathOrDot(), .{
+                        .iterate = true,
+                        .follow_symlinks = false,
+                    }) catch |err| switch (err) {
+                        error.Canceled => |e| return e,
+                        else => |e| return step.fail(maker, "opening {qf} failed: {t}", .{ dir_path, e }),
+                    };
+                    defer dir.close(io);
+
+                    var walker = try dir.walk(gpa);
+                    defer walker.deinit(io);
+
+                    while (walker.next(io) catch |err| switch (err) {
+                        error.OutOfMemory, error.Canceled => |e| return e,
+                        else => |e| return step.fail(maker, "walking {qf} failed: {t}", .{ dir_path, e }),
+                    }) |dir_entry| {
+                        const symlink = switch (dir_entry.kind) {
+                            .directory => {
+                                const unresolved_path = try dir_path.join(tmp_arena, dir_entry.path);
+                                var diagnostic: Cache.Manifest.AddDiscoveredPathDiagnostic = .none;
+                                man.addDiscoveredPath(.{
+                                    .discovered_path = .{ .unresolved = unresolved_path },
+                                    .handle = .{ .dir = null },
+                                    .metadata_only = metadata_only,
+                                    .diagnostic = &diagnostic,
+                                }) catch |err| switch (err) {
+                                    else => |e| return e,
+                                    error.FileSystemFailure => {
+                                        return step.fail(maker, "tracking {qf} in cache: {f}", .{
+                                            unresolved_path, diagnostic,
+                                        });
+                                    },
+                                };
+                                continue;
+                            },
+                            .file => false,
+                            .sym_link => true,
+                            else => return step.fail(maker, "path {qf} of type {t} cannot be stored in {t} archive", .{
+                                try dir_path.join(tmp_arena, dir_entry.path),
+                                dir_entry.kind,
+                                container,
+                            }),
+                        };
+                        const entry_path = try std.mem.concat(tmp_arena, u8, &.{ prefix, dir_entry.path });
+                        // If necessary, normalize path separators to POSIX-style since the tar format requires that.
+                        if (comptime (std.fs.path.sep != std.fs.path.sep_posix)) {
+                            std.mem.replaceScalar(u8, entry_path, std.fs.path.sep, std.fs.path.sep_posix);
+                        }
+                        try all_entries.put(tmp_arena, entry_path, .{
+                            .index = @intCast(i),
+                            .symlink = symlink,
+                        });
+                    }
+                } else {
+                    const entry_path = entry.path.value.?.slice(conf);
+                    try all_entries.put(tmp_arena, entry_path, .{
+                        .index = @intCast(i),
+                        .symlink = false,
+                    });
+                }
+            },
+            .link => {
+                const entry_path = entry.path.value.?.slice(conf);
+                try all_entries.put(tmp_arena, entry_path, .{
+                    .index = @intCast(i),
+                    .symlink = false,
+                });
+            },
+        }
+    }
 
     const digest = man.missDigestHex();
     const out_path = try maker.setGeneratedPath(conf_archive.generated_file, .local_cache, &.{
@@ -211,14 +232,11 @@ pub fn make(
         var file_write_buffer: [4096]u8 = undefined;
         var file_writer = file.writer(io, &file_write_buffer);
 
-        // TODO check for if compression is enabled
         var compress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
         var compress = std.compress.flate.Compress.init(&file_writer.interface, &compress_buffer, .gzip, .level_9) catch |err| switch (err) {
             error.WriteFailed => switch (file_writer.err.?) {
                 error.Canceled => |e| return e,
-                error.WriteFailed => return step.fail(maker, "writing to {f} failed: {t}", .{
-                    out_path, file_writer.err.?,
-                }),
+                else => |e| return step.fail(maker, "writing to {f} failed: {t}", .{ out_path, e }),
             },
         };
 
@@ -226,47 +244,155 @@ pub fn make(
         var archiver: std.tar.Writer = .{
             .underlying_writer = &compress.writer,
         };
+        var link_name_buffer: [4096]u8 = undefined;
 
         for (all_entries.keys(), all_entries.values()) |entry_path, entry_lookup| {
-            const entry = conf_archive.entries.slice[entry_lookup.index];
-            switch (entry.tag) {
+            const entry_index = conf_archive.entries.slice[entry_lookup.index];
+            const entry = entry_index.get(conf);
+            switch (entry.flags.tag) {
                 .file => {
-                    if (entry.bytes) |contents| {
-                        archiver.writeFileBytes(entry_path, contents, .{
-                            .mtime = entry.mtime.get() orelse 0,
+                    assert(!entry_lookup.symlink);
+                    if (entry.bytes.value) |contents| {
+                        archiver.writeFileBytes(entry_path, contents.slice(conf), .{
+                            // Checked in the configure phase.
+                            .mtime = std.tar.Writer.Header.Mtime.init(entry.mtime.value orelse 0) catch unreachable,
                         }) catch |err| switch (err) {
-                            error.WriteFailed => return file_writer.err.?, // TODO
-                            //else => |e| @panic("TODO"),
+                            // TODO check the compress error first
+                            error.WriteFailed => switch (file_writer.err.?) {
+                                error.Canceled => |e| return e,
+                                else => |e| return step.fail(maker, "writing archive entry {q} failed: {t}", .{
+                                    entry_path, e,
+                                }),
+                            },
                         };
-                    } else if (entry.lazy_path) |lazy_path| {
-                        const file_path = try maker.resolveLazyPath(arena, lazy_path, step_index);
+                    } else if (entry.lazy_path.value) |lazy_path| {
+                        const file_path = try maker.resolveLazyPathIndex(arena, lazy_path, step_index);
 
-                        var input_file = try file_path.root_dir.handle.openFile(io, file_path.sub_path, .{});
+                        var input_file = file_path.root_dir.handle.openFile(io, file_path.sub_path, .{}) catch |err| switch (err) {
+                            error.Canceled => |e| return e,
+                            else => |e| return step.fail(maker, "failed to open {qf}: {t}", .{ file_path, e }),
+                        };
                         defer input_file.close(io);
 
-                        const mtime: u64 = entry.mtime.get() orelse m: {
+                        const mtime: u64 = entry.mtime.value orelse m: {
                             const stat = input_file.stat(io) catch |err| switch (err) {
                                 error.Canceled => |e| return e,
-                                else => |e| return step.fail("failed to stat {f}: {t}", .{ file_path, e }),
+                                else => |e| return step.fail(maker, "failed to stat {qf}: {t}", .{ file_path, e }),
                             };
                             break :m @intCast(stat.mtime.toSeconds());
                         };
 
                         var file_reader: Io.File.Reader = .init(input_file, io, &file_read_buffer);
-                        archiver.writeFile(entry_path, &file_reader, mtime) catch |err| switch (err) {
-                            error.ReadFailed => return file_reader.err.?, // TODO
-                            error.WriteFailed => return file_writer.err.?, // TODO
-                            else => |e| return e,
+                        archiver.writeFile(entry_path, &file_reader, .{
+                            // Validated in configuration.
+                            .mtime = std.tar.Writer.Header.Mtime.init(mtime) catch unreachable,
+                        }) catch |err| switch (err) {
+                            error.Canceled => |e| return e,
+                            error.ReadFailed => switch (file_reader.err.?) {
+                                error.Canceled => |e| return e,
+                                else => |e| return step.fail(maker, "reading {qf} failed: {t}", .{ file_path, e }),
+                            },
+                            // TODO check the compress error first
+                            error.WriteFailed => switch (file_writer.err.?) {
+                                error.Canceled => |e| return e,
+                                else => |e| return step.fail(maker, "writing to archive entry {q} failed: {t}", .{
+                                    entry_path, e,
+                                }),
+                            },
+                            else => |e| return step.fail(maker, "writing to archive entry {q} failed: {t}", .{
+                                entry_path, e,
+                            }),
                         };
                     } else unreachable;
                 },
                 .dir => {
-                    if (entry.lazy_path) |lazy_path| {
-                        // This is the path to the base directory and the entry_path is the
-                        // sub_path.
+                    if (entry.lazy_path.value) |lazy_path| {
+                        // This is the path to the base directory and the entry_path minus the
+                        // prefix is the sub path.
+                        const prefix: []const u8 = if (entry.path.value) |p| p.slice(conf) else "";
+                        const dir_path = try maker.resolveLazyPathIndex(arena, lazy_path, step_index);
+                        const fs_path = try dir_path.join(tmp_arena, entry_path[prefix.len..]);
+                        if (entry_lookup.symlink) {
+                            const mtime: u64 = entry.mtime.value orelse m: {
+                                const stat = fs_path.root_dir.handle.statFile(io, fs_path.sub_path, .{
+                                    .follow_symlinks = false,
+                                }) catch |err| switch (err) {
+                                    error.Canceled => |e| return e,
+                                    else => |e| return step.fail(maker, "failed to stat {qf}: {t}", .{ fs_path, e }),
+                                };
+                                break :m @intCast(stat.mtime.toSeconds());
+                            };
+                            const n = fs_path.root_dir.handle.readLink(
+                                io,
+                                fs_path.sub_path,
+                                &link_name_buffer,
+                            ) catch |err| switch (err) {
+                                error.Canceled => |e| return e,
+                                else => |e| return step.fail(maker, "reading link {qf} failed: {t}", .{ fs_path, e }),
+                            };
+                            const link_name = link_name_buffer[0..n];
+                            archiver.writeLink(entry_path, link_name, .{
+                                // Validated in configuration.
+                                .mtime = std.tar.Writer.Header.Mtime.init(mtime) catch unreachable,
+                            }) catch |err| switch (err) {
+                                error.WriteFailed => switch (file_writer.err.?) {
+                                    error.Canceled => |e| return e,
+                                    else => |e| return step.fail(maker, "writing to archive entry {q} failed: {t}", .{
+                                        entry_path, e,
+                                    }),
+                                },
+                            };
+                        } else {
+                            var input_file = fs_path.root_dir.handle.openFile(io, fs_path.sub_path, .{}) catch |err| switch (err) {
+                                error.Canceled => |e| return e,
+                                else => |e| return step.fail(maker, "opening file {qf} failed: {t}", .{ fs_path, e }),
+                            };
+                            defer input_file.close(io);
 
+                            const mtime: u64 = entry.mtime.value orelse m: {
+                                const stat = input_file.stat(io) catch |err| switch (err) {
+                                    error.Canceled => |e| return e,
+                                    else => |e| return step.fail(maker, "failed to stat {qf}: {t}", .{ fs_path, e }),
+                                };
+                                break :m @intCast(stat.mtime.toSeconds());
+                            };
+
+                            var file_reader: Io.File.Reader = .init(input_file, io, &file_read_buffer);
+                            archiver.writeFile(entry_path, &file_reader, .{
+                                // Validated in configuration.
+                                .mtime = std.tar.Writer.Header.Mtime.init(mtime) catch unreachable,
+                            }) catch |err| switch (err) {
+                                error.Canceled => |e| return e,
+                                error.ReadFailed => switch (file_reader.err.?) {
+                                    error.Canceled => |e| return e,
+                                    else => |e| return step.fail(maker, "reading {qf} failed: {t}", .{ fs_path, e }),
+                                },
+                                // TODO check the compress error first
+                                error.WriteFailed => switch (file_writer.err.?) {
+                                    error.Canceled => |e| return e,
+                                    else => |e| return step.fail(maker, "writing to archive entry {q} failed: {t}", .{
+                                        entry_path, e,
+                                    }),
+                                },
+                                else => |e| return step.fail(maker, "writing to archive entry {q} failed: {t}", .{
+                                    entry_path, e,
+                                }),
+                            };
+                        }
                     } else {
-                        try archiver.writeDir(entry_path, .{ .mtime = mtime });
+                        assert(!entry_lookup.symlink);
+                        archiver.writeDir(entry_path, .{
+                            // Validated in configuration.
+                            .mtime = std.tar.Writer.Header.Mtime.init(entry.mtime.value.?) catch unreachable,
+                        }) catch |err| switch (err) {
+                            // TODO check the compress error first
+                            error.WriteFailed => switch (file_writer.err.?) {
+                                error.Canceled => |e| return e,
+                                else => |e| return step.fail(maker, "writing to archive entry {q} failed: {t}", .{
+                                    entry_path, e,
+                                }),
+                            },
+                        };
                     }
                 },
                 .link => @panic("TODO"),
@@ -276,13 +402,13 @@ pub fn make(
         compress.finish() catch |err| switch (err) {
             error.WriteFailed => switch (file_writer.err.?) {
                 error.Canceled => |e| return e,
-                error.WriteFailed => |other| return step.fail(maker, "writing to {f} failed: {t}", .{ out_path, other }),
+                else => |e| return step.fail(maker, "finishing archive compression failed: {t}", .{e}),
             },
         };
 
         file_writer.flush() catch |err| switch (err) {
             error.Canceled => |e| return e,
-            error.WriteFailed => |e| return step.fail(maker, "writing to {f} failed: {t}", .{ out_path, e }),
+            else => |e| return step.fail(maker, "flushing archive failed: {t}", .{e}),
         };
     }
 
