@@ -393,7 +393,8 @@ fn printOutput(
                 const target_query = try std.Target.Query.parse(.{
                     .arch_os_abi = triple,
                 });
-                const target = try std.zig.system.resolveTargetQuery(io, target_query);
+                var target_query_diags: std.zig.system.ResolveTargetDiagnostics = undefined;
+                const target = try std.zig.system.resolveTargetQuery(io, arena, target_query, &target_query_diags);
                 switch (getExternalExecutor(io, &target, .{
                     .host_cpu_arch = host.cpu.arch,
                     .host_os_tag = host.os.tag,
