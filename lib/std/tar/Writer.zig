@@ -8,9 +8,9 @@ const testing = std.testing;
 const block_size = @sizeOf(Header);
 
 underlying_writer: *Io.Writer,
-/// All file paths will be prefixed with this string in the output.
-///
-/// Path separators are assumed to be '/'.
+/// * All entry paths will be prepended with this path in the archive.
+/// * Assumed to use '/' for path separators.
+/// * Assumed to not end with '/'.
 prefix: []const u8 = "",
 
 pub const WriteDirOptions = struct {
@@ -70,7 +70,7 @@ pub fn writeFile(
         .typeflag = .file,
         .mode = options.mode,
         .mtime = options.mtime,
-        .size = .initSize(size),
+        .size = Header.initSize(size),
         .checksum = undefined,
     };
     try setPath(w, writer.prefix, &header, entry_path);
@@ -97,10 +97,10 @@ pub fn writeFileStream(
 ) WriteFileStreamError!void {
     const w = writer.underlying_writer;
     var header: Header = .{
-        .typeflag = .file,
+        .typeflag = .regular,
         .mode = options.mode,
         .mtime = options.mtime,
-        .size = .initSize(size),
+        .size = Header.initSize(size),
         .checksum = undefined,
     };
     try setPath(w, writer.prefix, &header, entry_path);
@@ -123,10 +123,10 @@ pub fn writeFileBytes(
 ) Io.Writer.Error!void {
     const w = writer.underlying_writer;
     var header: Header = .{
-        .typeflag = .file,
+        .typeflag = .regular,
         .mode = options.mode,
         .mtime = options.mtime,
-        .size = .initSize(content.len),
+        .size = Header.initSize(content.len),
         .checksum = undefined,
     };
     try setPath(w, writer.prefix, &header, entry_path);
@@ -180,7 +180,7 @@ fn setPath(w: *Io.Writer, prefix: []const u8, header: *Header, sub_path: []const
                 &.{sub_path}
             else
                 &.{ prefix, "/", sub_path };
-            try w.writeExtendedHeader(w, .gnu_long_name, buffers);
+            try writeExtendedHeader(w, .gnu_long_name, buffers);
         },
     };
 }
@@ -191,7 +191,7 @@ fn writeExtendedHeader(w: *Io.Writer, type_flag: Header.TypeFlag, buffers: []con
     for (buffers) |buf| len += buf.len;
     var header: Header = .{
         .typeflag = type_flag,
-        .size = .initSize(len),
+        .size = Header.initSize(len),
         .mode = .zero,
         .mtime = .zero,
         .checksum = undefined,
@@ -413,7 +413,13 @@ pub const Header = extern struct {
         };
 
         for (cases) |case| {
-            var header = Header.init(.regular);
+            var header: Header = .{
+                .typeflag = .regular,
+                .mode = .default_file,
+                .size = undefined,
+                .mtime = undefined,
+                .checksum = undefined,
+            };
             try header.setPath(case.in[0], case.in[1]);
             try testing.expectEqualStrings(case.out[0], std.mem.sliceTo(&header.prefix, 0));
             try testing.expectEqualStrings(case.out[1], std.mem.sliceTo(&header.name, 0));
@@ -432,7 +438,13 @@ pub const Header = extern struct {
         };
 
         for (error_cases) |case| {
-            var header = Header.init(.regular);
+            var header: Header = .{
+                .typeflag = .regular,
+                .mode = .default_file,
+                .size = undefined,
+                .mtime = undefined,
+                .checksum = undefined,
+            };
             try testing.expectError(
                 error.NameTooLong,
                 header.setPath(case.in[0], case.in[1]),
@@ -466,9 +478,12 @@ test "write files" {
         const root = "root";
 
         var output: Io.Writer.Allocating = .init(testing.allocator);
-        var w: Writer = .{ .underlying_writer = &output.writer };
+        var w: Writer = .{
+            .underlying_writer = &output.writer,
+        };
         defer output.deinit();
-        try w.setRoot(root);
+        try w.writeDir(root, .{});
+        w.prefix = root;
         for (files) |file|
             try w.writeFileBytes(file.path, file.content, .{});
 
