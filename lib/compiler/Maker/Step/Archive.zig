@@ -235,6 +235,7 @@ pub fn make(
         var file_write_buffer: [4096]u8 = undefined;
         var file_writer = file.writer(io, &file_write_buffer);
 
+        // TODO handle when compression is none
         var compress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
         var compress = std.compress.flate.Compress.init(&file_writer.interface, &compress_buffer, .gzip, .level_9) catch |err| switch (err) {
             error.WriteFailed => switch (file_writer.err.?) {
@@ -259,6 +260,7 @@ pub fn make(
                 .file => {
                     assert(!entry_lookup.symlink);
                     if (entry.bytes.value) |contents| {
+                        // TODO handle detect_executables
                         archiver.writeFileBytes(entry_path, contents.slice(conf), .{
                             // Checked in the configure phase.
                             .mtime = std.tar.Writer.Header.Mtime.init(entry.mtime.value orelse 0) catch unreachable,
@@ -289,6 +291,7 @@ pub fn make(
                         };
 
                         var file_reader: Io.File.Reader = .init(input_file, io, &file_read_buffer);
+                        // TODO handle detect_executables
                         archiver.writeFile(entry_path, &file_reader, .{
                             // Validated in configuration.
                             .mtime = std.tar.Writer.Header.Mtime.init(mtime) catch unreachable,
@@ -364,6 +367,7 @@ pub fn make(
                             };
 
                             var file_reader: Io.File.Reader = .init(input_file, io, &file_read_buffer);
+                            // TODO handle detect_executables
                             archiver.writeFile(entry_path, &file_reader, .{
                                 // Validated in configuration.
                                 .mtime = std.tar.Writer.Header.Mtime.init(mtime) catch unreachable,

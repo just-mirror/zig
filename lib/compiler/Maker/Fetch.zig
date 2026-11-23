@@ -2226,7 +2226,7 @@ fn depName(f: *const Fetch) []const u8 {
 }
 
 // Detects executable header: ELF or Macho-O magic header or shebang line.
-const FileHeader = struct {
+pub const FileHeader = struct {
     header: [4]u8 = undefined,
     bytes_read: usize = 0,
 

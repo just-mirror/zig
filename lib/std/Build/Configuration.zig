@@ -636,7 +636,8 @@ pub const Step = extern struct {
                 lazy_path: bool,
                 bytes: bool,
                 mtime: bool,
-                _: u26 = 0,
+                detect_executables: bool,
+                _: u25 = 0,
             };
 
             pub const Tag = enum(u2) {

@@ -70,6 +70,10 @@ pub const EntryOptions = struct {
     /// Zero is a common choice to make generated archives more reproducible. Null indicates to
     /// match the file being copied into the archive.
     mtime: ?u64 = 0,
+    /// When true, file entries that have a shebang, an ELF header, or a Mach-O executable header
+    /// will receive an executable bit. Otherwise, all files will be set to the default file
+    /// permission mode.
+    detect_executables: bool = true,
 
     fn assert(eo: *const EntryOptions) void {
         if (eo.mtime) |mtime| _ = std.tar.Writer.Header.Mtime.init(mtime) catch unreachable; // Invalid mtime.
@@ -91,6 +95,7 @@ pub fn addDirectoryEntry(a: *Archive, entry_path: []const u8, options: EntryOpti
             .lazy_path = false,
             .bytes = false,
             .mtime = true,
+            .detect_executables = options.detect_executables,
         },
         .path = addStringPrefixed(wc, a.prefix, entry_path),
         .mtime = options.mtime,
@@ -117,6 +122,7 @@ pub fn addDirectory(a: *Archive, prefix: []const u8, lazy_dir: LazyPath, options
             .lazy_path = true,
             .bytes = false,
             .mtime = options.mtime != null,
+            .detect_executables = options.detect_executables,
         },
         .path = path,
         .lazy_path = lazy_dir,
@@ -139,6 +145,7 @@ pub fn addFile(a: *Archive, entry_path: []const u8, lazy_path: LazyPath, options
             .lazy_path = true,
             .bytes = false,
             .mtime = options.mtime != null,
+            .detect_executables = options.detect_executables,
         },
         .path = addStringPrefixed(wc, a.prefix, entry_path),
         .lazy_path = lazy_path,
@@ -166,6 +173,7 @@ pub fn addFileContents(
             .lazy_path = false,
             .bytes = true,
             .mtime = true,
+            .detect_executables = options.detect_executables,
         },
         .path = addStringPrefixed(wc, a.prefix, entry_path),
         .bytes = wc.addBytes(contents) catch @panic("OOM"),
@@ -186,6 +194,7 @@ pub fn addLink(a: *Archive, entry_path: []const u8, link_contents: []const u8, o
             .lazy_path = false,
             .bytes = true,
             .mtime = true,
+            .detect_executables = options.detect_executables,
         },
         .path = addStringPrefixed(wc, a.prefix, entry_path),
         .bytes = wc.addBytes(link_contents) catch @panic("OOM"),
