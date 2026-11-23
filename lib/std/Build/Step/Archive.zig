@@ -11,7 +11,6 @@ step: Step,
 generated_file: Configuration.GeneratedFileIndex,
 sub_path: Configuration.String,
 format: Configuration.Step.Archive.Format,
-// TODO account for this in the add* methods
 prefix: []const u8,
 sort: bool,
 entries: std.ArrayList(Entry),
@@ -31,7 +30,8 @@ pub const Options = struct {
     sub_path: []const u8,
     /// `null` indicates to infer from `sub_path`.
     format: ?Configuration.Step.Archive.Format = null,
-    /// Directory components that will be prepended to all entries.
+    /// Directory components that will be prepended to all entries. This is a string that is
+    /// prepended naively, without being interpreted as a path.
     prefix: []const u8 = "",
     /// Determines whether the archive's entries will be sorted bytewise by entry name, ascending.
     sort: bool = true,
@@ -60,6 +60,7 @@ pub fn create(owner: *std.Build, options: Options) *Archive {
         },
         .prefix = options.prefix,
         .sort = options.sort,
+        .entries = .empty,
     };
     return a;
 }
@@ -71,7 +72,7 @@ pub const EntryOptions = struct {
     mtime: ?u64 = 0,
 
     fn assert(eo: *const EntryOptions) void {
-        if (eo.mtime) |mtime| std.tar.Writer.Header.Mtime.init(mtime) catch unreachable; // Invalid mtime.
+        if (eo.mtime) |mtime| _ = std.tar.Writer.Header.Mtime.init(mtime) catch unreachable; // Invalid mtime.
     }
 };
 
@@ -91,7 +92,7 @@ pub fn addDirectoryEntry(a: *Archive, entry_path: []const u8, options: EntryOpti
             .bytes = false,
             .mtime = true,
         },
-        .path = wc.addString(entry_path) catch @panic("OOM"),
+        .path = addStringPrefixed(wc, a.prefix, entry_path),
         .mtime = options.mtime,
     }) catch @panic("OOM");
 }
@@ -104,18 +105,25 @@ pub fn addDirectory(a: *Archive, prefix: []const u8, lazy_dir: LazyPath, options
     options.assert();
     const graph = a.step.owner.graph;
     const wc = &graph.wip_configuration;
+    const path: Configuration.OptionalString = if (prefix.len == 0 and a.prefix.len == 0)
+        .none
+    else
+        .init(addStringPrefixed(wc, a.prefix, prefix));
+
     a.entries.append(graph.arena, .{
         .flags = .{
             .tag = .dir,
-            .path = prefix.len != 0,
+            .path = path != .none,
             .lazy_path = true,
             .bytes = false,
             .mtime = options.mtime != null,
         },
-        .path = if (prefix.len == 0) null else wc.addString(prefix) catch @panic("OOM"),
+        .path = path,
         .lazy_path = lazy_dir,
         .mtime = options.mtime,
     }) catch @panic("OOM");
+
+    lazy_dir.addStepDependencies(&a.step);
 }
 
 /// Adds the file contents of `lazy_path` to the archive, ignoring the file system name and using
@@ -132,10 +140,12 @@ pub fn addFile(a: *Archive, entry_path: []const u8, lazy_path: LazyPath, options
             .bytes = false,
             .mtime = options.mtime != null,
         },
-        .path = wc.addString(entry_path) catch @panic("OOM"),
+        .path = addStringPrefixed(wc, a.prefix, entry_path),
         .lazy_path = lazy_path,
         .mtime = options.mtime,
     }) catch @panic("OOM");
+
+    lazy_path.addStepDependencies(&a.step);
 }
 
 /// Adds the provided contents to the archive as a file named `entry_path` inside the archive.
@@ -157,7 +167,7 @@ pub fn addFileContents(
             .bytes = true,
             .mtime = true,
         },
-        .path = wc.addString(entry_path) catch @panic("OOM"),
+        .path = addStringPrefixed(wc, a.prefix, entry_path),
         .bytes = wc.addBytes(contents) catch @panic("OOM"),
         .mtime = options.mtime,
     }) catch @panic("OOM");
@@ -177,7 +187,7 @@ pub fn addLink(a: *Archive, entry_path: []const u8, link_contents: []const u8, o
             .bytes = true,
             .mtime = true,
         },
-        .path = wc.addString(entry_path) catch @panic("OOM"),
+        .path = addStringPrefixed(wc, a.prefix, entry_path),
         .bytes = wc.addBytes(link_contents) catch @panic("OOM"),
         .mtime = options.mtime,
     }) catch @panic("OOM");
@@ -186,4 +196,12 @@ pub fn addLink(a: *Archive, entry_path: []const u8, link_contents: []const u8, o
 /// Returns the main artifact of this `Step` which is the generated archive file.
 pub fn generatedFile(a: *Archive) LazyPath {
     return .{ .generated = .{ .index = a.generated_file } };
+}
+
+fn addStringPrefixed(wc: *Configuration.Wip, prefix: []const u8, string: []const u8) Configuration.String {
+    if (prefix.len == 0) return wc.addString(string) catch @panic("OOM");
+    const gpa = wc.gpa;
+    const concatted = std.mem.concat(gpa, u8, &.{ prefix, string }) catch @panic("OOM");
+    defer gpa.free(concatted);
+    return wc.addString(concatted) catch @panic("OOM");
 }

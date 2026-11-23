@@ -213,6 +213,9 @@ pub fn make(
     // Finally we can create the archive. This block is for closing the file before writing the
     // cache manifest.
     {
+        const compress_node = progress_node.start("compressing", all_entries.count());
+        defer compress_node.end();
+
         var file: Io.File = out_path.root_dir.handle.createFile(io, out_path.sub_path, .{}) catch |err| switch (err) {
             error.Canceled => |e| return e,
             error.FileNotFound => f: {
@@ -247,6 +250,9 @@ pub fn make(
         var link_name_buffer: [4096]u8 = undefined;
 
         for (all_entries.keys(), all_entries.values()) |entry_path, entry_lookup| {
+            const node = compress_node.start(entry_path, 0);
+            defer node.end();
+
             const entry_index = conf_archive.entries.slice[entry_lookup.index];
             const entry = entry_index.get(conf);
             switch (entry.flags.tag) {

@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     const tar = b.addArchive(.{
         .sub_path = "project.tar.gz",
     });
-    tar.addDirectory("project/", wf.getDirectory().path(b, "project"));
+    tar.addDirectory("project/", wf.getDirectory().path(b, "project"), .{});
     const archive_file = tar.generatedFile();
 
     const install_tar = b.addInstallFileWithDir(archive_file, .prefix, "project.tar.gz");
