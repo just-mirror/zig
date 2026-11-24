@@ -258,8 +258,10 @@ fn serveSourcesTar(request: *std.http.Server.Request, context: *Context) !void {
     var walker = try std_dir.walk(gpa);
     defer walker.deinit(io);
 
-    var archiver: std.tar.Writer = .{ .underlying_writer = &response.writer };
-    archiver.prefix = "std";
+    var archiver: std.tar.Writer = .{
+        .underlying_writer = &response.writer,
+        .prefix = "std",
+    };
 
     var path_buf: std.ArrayList(u8) = .empty;
     defer path_buf.deinit(gpa);
@@ -293,7 +295,7 @@ fn serveSourcesTar(request: *std.http.Server.Request, context: *Context) !void {
             break :blk path_buf.items;
         };
 
-        try archiver.writeFileTimestamp(posix_path, &file_reader, stat.mtime);
+        try archiver.writeFile(posix_path, &file_reader, .{});
     }
 
     {
