@@ -15,20 +15,22 @@
 //! GNU tar reference: https://www.gnu.org/software/tar/manual/html_node/Standard.html
 //! pax reference: https://pubs.opengroup.org/onlinepubs/9699919799/utilities/pax.html#tag_20_92_13
 
-const std = @import("std");
 const builtin = @import("builtin");
+
+const std = @import("std");
 const Io = std.Io;
 const assert = std.debug.assert;
 const testing = std.testing;
+const Allocator = std.mem.Allocator;
 
 pub const Writer = @import("tar/Writer.zig");
 
-/// Provide this to receive detailed error messages.
-/// When this is provided, some errors which would otherwise be returned
-/// immediately will instead be added to this structure. The API user must check
-/// the errors in diagnostics to know whether the operation succeeded or failed.
+/// When this is provided, some errors which would otherwise be returned immediately will instead be
+/// added to this structure. The API user must check the errors in diagnostics to know whether the
+/// operation succeeded or failed.
 pub const Diagnostics = struct {
-    allocator: std.mem.Allocator,
+    // TODO make this be an arena and simplify deinit
+    allocator: Allocator,
     errors: std.ArrayList(Error) = .empty,
 
     entries: usize = 0,
@@ -36,13 +38,29 @@ pub const Diagnostics = struct {
 
     pub const Error = union(enum) {
         unable_to_create_sym_link: struct {
+            /// TODO https://codeberg.org/ziglang/zig/issues/36795 and then make this be an explicit
+            /// error set minus Io.Cancelable
             code: anyerror,
             file_name: []const u8,
             link_name: []const u8,
         },
-        unable_to_create_file: struct {
+        create_file_failed: struct {
+            /// TODO https://codeberg.org/ziglang/zig/issues/36795 and then make this be an explicit
+            /// error set minus Io.Cancelable
             code: anyerror,
-            file_name: []const u8,
+            path: []const u8,
+        },
+        create_dir_path_failed: struct {
+            /// TODO https://codeberg.org/ziglang/zig/issues/36795 and then make this be an explicit
+            /// error set minus Io.Cancelable
+            code: anyerror,
+            path: []const u8,
+        },
+        writing_file_failed: struct {
+            /// TODO https://codeberg.org/ziglang/zig/issues/36795 and then make this be an explicit
+            /// error set minus Io.Cancelable
+            code: anyerror,
+            path: []const u8,
         },
         unsupported_file_type: struct {
             file_name: []const u8,
@@ -53,7 +71,7 @@ pub const Diagnostics = struct {
         },
     };
 
-    fn findRoot(d: *Diagnostics, kind: FileKind, path: []const u8) !void {
+    fn findRoot(d: *Diagnostics, kind: FileKind, path: []const u8) Allocator.Error!void {
         if (path.len == 0) return;
 
         d.entries += 1;
@@ -103,8 +121,14 @@ pub const Diagnostics = struct {
                     d.allocator.free(info.file_name);
                     d.allocator.free(info.link_name);
                 },
-                .unable_to_create_file => |info| {
-                    d.allocator.free(info.file_name);
+                .create_file_failed => |info| {
+                    d.allocator.free(info.path);
+                },
+                .create_dir_path_failed => |info| {
+                    d.allocator.free(info.path);
+                },
+                .writing_file_failed => |info| {
+                    d.allocator.free(info.path);
                 },
                 .unsupported_file_type => |info| {
                     d.allocator.free(info.file_name);
@@ -120,13 +144,12 @@ pub const Diagnostics = struct {
     }
 };
 
-/// Deprecated, renamed to `ExtractOptions`.
-pub const PipeOptions = ExtractOptions;
-
 pub const ExtractOptions = struct {
     /// Number of directory levels to skip when extracting files.
     strip_components: u32 = 0,
     /// How to handle the "mode" property of files from within the tar file.
+    /// TODO add another one for setting executable bit based on file contents and ignoring the mode
+    /// from the archive.
     mode_mode: ModeMode = .executable_bit_only,
     /// Prevents creation of empty directories.
     exclude_empty_directories: bool = false,
@@ -188,9 +211,11 @@ const Header = struct {
         return buffer[0 .. p.len + 1 + n.len];
     }
 
+    pub const LinkNameError = error{TarInsufficientBuffer};
+
     /// When kind is symbolic_link linked-to name (target_path) is specified in
     /// the linkname field.
-    pub fn linkName(header: Header, buffer: []u8) ![]const u8 {
+    pub fn linkName(header: Header, buffer: []u8) LinkNameError![]const u8 {
         const link_name = header.str(157, 100);
         if (link_name.len == 0) {
             return buffer[0..0];
@@ -209,7 +234,12 @@ const Header = struct {
         return @intCast(try header.octal(100, 8));
     }
 
-    pub fn size(header: Header) !u64 {
+    pub const SizeError = error{
+        TarNumericValueTooBig,
+        TarNumericValueNegative,
+    } || OctalError;
+
+    pub fn size(header: Header) SizeError!u64 {
         const start = 124;
         const len = 12;
         const raw = header.bytes[start..][0..len];
@@ -227,7 +257,7 @@ const Header = struct {
         return try header.octal(start, len);
     }
 
-    pub fn chksum(header: Header) !u64 {
+    pub fn chksum(header: Header) OctalError!u64 {
         return header.octal(148, 8);
     }
 
@@ -250,7 +280,9 @@ const Header = struct {
         return nullStr(header.bytes[start .. start + len]);
     }
 
-    fn octal(header: Header, start: usize, len: usize) !u64 {
+    const OctalError = error{TarHeader};
+
+    fn octal(header: Header, start: usize, len: usize) OctalError!u64 {
         const raw = header.bytes[start..][0..len];
         // Zero-filled octal number in ASCII. Each numeric field of width w
         // contains w minus 1 digits, and a null
@@ -277,14 +309,15 @@ const Header = struct {
         return cs;
     }
 
-    // Checks calculated chksum with value of chksum field.
-    // Returns error or valid chksum value.
-    // Zero value indicates empty block.
-    pub fn checkChksum(header: Header) !u64 {
+    pub const ChecksumError = Header.OctalError || error{TarHeaderChecksum};
+
+    /// Checks calculated chksum with value of chksum field. Returns error or valid chksum value.
+    /// Zero value indicates empty block.
+    pub fn checksum(header: Header) ChecksumError!u64 {
         const field = try header.chksum();
         const cs = header.computeChksum();
         if (field == 0 and cs.unsigned == 256) return 0;
-        if (field != cs.unsigned and field != cs.signed) return error.TarHeaderChksum;
+        if (field != cs.unsigned and field != cs.signed) return error.TarHeaderChecksum;
         return field;
     }
 };
@@ -349,29 +382,31 @@ pub const Iterator = struct {
         kind: FileKind = .file,
     };
 
-    fn readHeader(self: *Iterator) !?Header {
-        if (self.padding > 0) {
-            try self.reader.discardAll(self.padding);
+    const ReadHeaderError = Header.ChecksumError || Io.Reader.Error;
+
+    fn readHeader(it: *Iterator) ReadHeaderError!?Header {
+        if (it.padding > 0) {
+            try it.reader.discardAll(it.padding);
         }
-        const n = try self.reader.readSliceShort(&self.header_buffer);
+        const n = try it.reader.readSliceShort(&it.header_buffer);
         if (n == 0) return null;
-        if (n < Header.SIZE) return error.UnexpectedEndOfStream;
-        const header = Header{ .bytes = self.header_buffer[0..Header.SIZE] };
-        if (try header.checkChksum() == 0) return null;
+        if (n < Header.SIZE) return error.EndOfStream;
+        const header = Header{ .bytes = it.header_buffer[0..Header.SIZE] };
+        if (try header.checksum() == 0) return null;
         return header;
     }
 
-    fn readString(self: *Iterator, size: usize, buffer: []u8) ![]const u8 {
+    fn readString(it: *Iterator, size: usize, buffer: []u8) ![]const u8 {
         if (size > buffer.len) return error.TarInsufficientBuffer;
         const buf = buffer[0..size];
-        try self.reader.readSliceAll(buf);
+        try it.reader.readSliceAll(buf);
         return nullStr(buf);
     }
 
-    fn newFile(self: *Iterator) File {
+    fn newFile(it: *Iterator) File {
         return .{
-            .name = self.file_name_buffer[0..0],
-            .link_name = self.link_name_buffer[0..0],
+            .name = it.file_name_buffer[0..0],
+            .link_name = it.link_name_buffer[0..0],
         };
     }
 
@@ -381,24 +416,31 @@ pub const Iterator = struct {
         return @intCast(block_rounded - size);
     }
 
-    /// Iterates through the tar archive as if it is a series of files.
-    /// Internally, the tar format often uses entries (header with optional
-    /// content) to add meta data that describes the next file. These
-    /// entries should not normally be visible to the outside. As such, this
-    /// loop iterates through one or more entries until it collects a all
-    /// file attributes.
-    pub fn next(self: *Iterator) !?File {
-        if (self.unread_file_bytes > 0) {
-            // If file content was not consumed by caller
-            try self.reader.discardAll64(self.unread_file_bytes);
-            self.unread_file_bytes = 0;
-        }
-        var file: File = self.newFile();
+    pub const NextError = ReadHeaderError || error{
+        TarHeadersTooBig,
+        /// Unreachable if diagnostics is provided.
+        TarUnsupportedHeader,
+        /// Unreachable if diagnostics is not provided.
+        OutOfMemory,
+    } || Header.LinkNameError || Header.SizeError || PaxIterator.NextError || PaxIterator.Attribute.ValueError;
 
-        while (try self.readHeader()) |header| {
+    /// Iterates through the tar archive one file system entry at a time.
+    ///
+    /// Internally, the tar format uses extra entries to add meta data that describes the next file.
+    /// As such, this function iterates through one or more archive entries until it collects all
+    /// attributes for one file system entry.
+    pub fn next(it: *Iterator) NextError!?File {
+        if (it.unread_file_bytes > 0) {
+            // If file content was not consumed by caller
+            try it.reader.discardAll64(it.unread_file_bytes);
+            it.unread_file_bytes = 0;
+        }
+        var file: File = it.newFile();
+
+        while (try it.readHeader()) |header| {
             const kind = header.kind();
             const size: u64 = try header.size();
-            self.padding = blockPadding(size);
+            it.padding = blockPadding(size);
 
             switch (kind) {
                 // File types to return upstream
@@ -416,38 +458,38 @@ pub const Iterator = struct {
                         file.size = size;
                     }
                     if (file.link_name.len == 0) {
-                        file.link_name = try header.linkName(self.link_name_buffer);
+                        file.link_name = try header.linkName(it.link_name_buffer);
                     }
                     if (file.name.len == 0) {
-                        file.name = try header.fullName(self.file_name_buffer);
+                        file.name = try header.fullName(it.file_name_buffer);
                     }
 
-                    self.padding = blockPadding(file.size);
-                    self.unread_file_bytes = file.size;
+                    it.padding = blockPadding(file.size);
+                    it.unread_file_bytes = file.size;
                     return file;
                 },
                 // Prefix header types
                 .gnu_long_name => {
-                    file.name = try self.readString(@intCast(size), self.file_name_buffer);
+                    file.name = try it.readString(@intCast(size), it.file_name_buffer);
                 },
                 .gnu_long_link => {
-                    file.link_name = try self.readString(@intCast(size), self.link_name_buffer);
+                    file.link_name = try it.readString(@intCast(size), it.link_name_buffer);
                 },
                 .extended_header => {
                     // Use just attributes from last extended header.
-                    file = self.newFile();
+                    file = it.newFile();
 
                     var rdr: PaxIterator = .{
-                        .reader = self.reader,
+                        .reader = it.reader,
                         .size = @intCast(size),
                     };
                     while (try rdr.next()) |attr| {
                         switch (attr.kind) {
                             .path => {
-                                file.name = try attr.value(self.file_name_buffer);
+                                file.name = try attr.value(it.file_name_buffer);
                             },
                             .linkpath => {
-                                file.link_name = try attr.value(self.link_name_buffer);
+                                file.link_name = try attr.value(it.link_name_buffer);
                             },
                             .size => {
                                 var buf: [pax_max_size_attr_len]u8 = undefined;
@@ -458,19 +500,19 @@ pub const Iterator = struct {
                 },
                 // Ignored header type
                 .global_extended_header => {
-                    self.reader.discardAll64(size) catch return error.TarHeadersTooBig;
+                    it.reader.discardAll64(size) catch return error.TarHeadersTooBig;
                 },
                 // All other are unsupported header types
                 else => {
-                    const d = self.diagnostics orelse return error.TarUnsupportedHeader;
+                    const d = it.diagnostics orelse return error.TarUnsupportedHeader;
                     try d.errors.append(d.allocator, .{ .unsupported_file_type = .{
                         .file_name = try d.allocator.dupe(u8, header.name()),
                         .file_type = kind,
                     } });
                     if (kind == .gnu_sparse) {
-                        try self.skipGnuSparseExtendedHeaders(header);
+                        try it.skipGnuSparseExtendedHeaders(header);
                     }
-                    self.reader.discardAll64(size) catch return error.TarHeadersTooBig;
+                    it.reader.discardAll64(size) catch return error.TarHeadersTooBig;
                 },
             }
         }
@@ -482,11 +524,11 @@ pub const Iterator = struct {
         it.unread_file_bytes = 0;
     }
 
-    fn skipGnuSparseExtendedHeaders(self: *Iterator, header: Header) !void {
+    fn skipGnuSparseExtendedHeaders(it: *Iterator, header: Header) !void {
         var is_extended = header.bytes[482] > 0;
         while (is_extended) {
             var buf: [Header.SIZE]u8 = undefined;
-            try self.reader.readSliceAll(&buf);
+            try it.reader.readSliceAll(&buf);
             is_extended = buf[504] > 0;
         }
     }
@@ -505,30 +547,40 @@ pub const PaxIterator = struct {
     size: usize, // cumulative size of all pax attributes
     reader: *Io.Reader,
 
-    const Self = @This();
-
-    const Attribute = struct {
+    pub const Attribute = struct {
         kind: PaxAttributeKind,
         len: usize, // length of the attribute value
         reader: *Io.Reader, // reader positioned at value start
 
-        // Copies pax attribute value into destination buffer.
-        // Must be called with destination buffer of size at least Attribute.len.
-        pub fn value(self: Attribute, dst: []u8) ![]const u8 {
-            if (self.len > dst.len) return error.TarInsufficientBuffer;
-            // assert(self.len <= dst.len);
-            const buf = dst[0..self.len];
-            const n = try self.reader.readSliceShort(buf);
-            if (n < self.len) return error.UnexpectedEndOfStream;
-            try validateAttributeEnding(self.reader);
+        pub const ValueError = error{
+            /// Returned if the provided buffer is too small for the value.
+            TarInsufficientBuffer,
+            PaxNullInValue,
+            PaxInvalidAttributeEnd,
+        } || Io.Reader.Error;
+
+        /// Copies pax attribute into destination buffer.
+        pub fn value(attr: Attribute, buffer: []u8) ValueError![]const u8 {
+            if (attr.len > buffer.len) return error.TarInsufficientBuffer;
+            // assert(attr.len <= buffer.len);
+            const buf = buffer[0..attr.len];
+            const n = try attr.reader.readSliceShort(buf);
+            if (n < attr.len) return error.EndOfStream;
+            try validateAttributeEnding(attr.reader);
             if (hasNull(buf)) return error.PaxNullInValue;
             return buf;
         }
     };
 
-    // Iterates over pax attributes. Returns known only known attributes.
-    // Caller has to call value in Attribute, to advance reader across value.
-    pub fn next(self: *Self) !?Attribute {
+    pub const NextError = error{
+        PaxNullInKeyword,
+        PaxSizeAttrOverflow,
+        PaxInvalidAttributeEnd,
+    } || Io.Reader.DelimiterError || std.fmt.ParseIntError;
+
+    /// Iterates over pax attributes. Returns known only known attributes.
+    /// Caller has to call value in Attribute, to advance reader across value.
+    pub fn next(self: *PaxIterator) NextError!?Attribute {
         // Pax extended header consists of one or more attributes, each constructed as follows:
         // "%d %s=%s\n", <length>, <keyword>, <value>
         while (self.size > 0) {
@@ -540,7 +592,7 @@ pub const PaxIterator = struct {
 
             // calculate value_len
             const value_start = length_buf.len + keyword.len + 2; // 2 separators
-            if (length < value_start + 1 or self.size < length) return error.UnexpectedEndOfStream;
+            if (length < value_start + 1 or self.size < length) return error.EndOfStream;
             const value_len = length - value_start - 1; // \n separator at end
             self.size -= length;
 
@@ -582,12 +634,26 @@ pub const PaxIterator = struct {
     }
 };
 
-/// Deprecated, renamed to `extract`.
-pub const pipeToFileSystem = extract;
+pub const ExtractError = error{
+    /// If diagnostics is provided, this error is unreachable.
+    TarComponentsOutsideStrippedPrefix,
+    /// If diagnostics is provided, this error is unreachable.
+    TarLinkTargetOutsideStrippedPrefix,
+    /// If diagnostics is provided, this error is unreachable.
+    UnableToCreateSymLink,
+    /// If diagnostics is provided, this error is unreachable.
+    CreateDirPathFailed,
+    /// If diagnostics is provided, this error is unreachable.
+    CreateFilePathFailed,
+    /// If diagnostics is provided, this error is unreachable.
+    StreamFileFailed,
+    /// Unreachable if diagnostics is not provided.
+    OutOfMemory,
+} || Iterator.NextError || Io.Cancelable;
 
-/// Ingests tar file from `reader`, populating file contents within `dir`. If
-/// any file would be extracted outside of `dir`, an error is return instead.
-pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions) !void {
+/// Ingests tar file from `reader`, populating file contents within `dir`. If any file would be
+/// extracted outside of `dir`, an error is return instead.
+pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions) ExtractError!void {
     var file_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var link_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var sanitize_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -615,32 +681,68 @@ pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions)
         switch (file.kind) {
             .directory => {
                 if (file_name.len > 0 and !options.exclude_empty_directories) {
-                    try dir.createDirPath(io, file_name);
+                    dir.createDirPath(io, file_name) catch |err| switch (err) {
+                        error.Canceled => |e| return e,
+                        else => |e| {
+                            const d = options.diagnostics orelse return error.CreateDirPathFailed;
+                            try d.errors.append(d.allocator, .{ .create_dir_path_failed = .{
+                                .code = e,
+                                .path = try d.allocator.dupe(u8, file_name),
+                            } });
+                        },
+                    };
                 }
             },
             .file => {
                 if (createDirAndFile(io, dir, file_name, filePermissions(file.mode, options))) |fs_file| {
                     defer fs_file.close(io);
                     var file_writer = fs_file.writer(io, &file_contents_buffer);
-                    try it.streamRemaining(file, &file_writer.interface);
-                    try file_writer.interface.flush();
-                } else |err| {
-                    const d = options.diagnostics orelse return err;
-                    try d.errors.append(d.allocator, .{ .unable_to_create_file = .{
-                        .code = err,
-                        .file_name = try d.allocator.dupe(u8, file_name),
-                    } });
+                    it.streamRemaining(file, &file_writer.interface) catch |err| switch (err) {
+                        error.ReadFailed, error.EndOfStream => |e| return e,
+                        error.WriteFailed => switch (file_writer.err.?) {
+                            error.Canceled => |e| return e,
+                            else => |e| {
+                                const d = options.diagnostics orelse return error.StreamFileFailed;
+                                try d.errors.append(d.allocator, .{ .writing_file_failed = .{
+                                    .code = e,
+                                    .path = try d.allocator.dupe(u8, file_name),
+                                } });
+                            },
+                        },
+                    };
+                    file_writer.flush() catch |err| switch (err) {
+                        error.Canceled => |e| return e,
+                        else => |e| {
+                            const d = options.diagnostics orelse return error.StreamFileFailed;
+                            try d.errors.append(d.allocator, .{ .writing_file_failed = .{
+                                .code = e,
+                                .path = try d.allocator.dupe(u8, file_name),
+                            } });
+                        },
+                    };
+                } else |err| switch (err) {
+                    error.Canceled => |e| return e,
+                    else => |e| {
+                        const d = options.diagnostics orelse return error.CreateFilePathFailed;
+                        try d.errors.append(d.allocator, .{ .create_file_failed = .{
+                            .code = e,
+                            .path = try d.allocator.dupe(u8, file_name),
+                        } });
+                    },
                 }
             },
             .sym_link => {
                 const link_name = file.link_name;
-                createDirAndSymlink(io, dir, link_name, file_name) catch |err| {
-                    const d = options.diagnostics orelse return error.UnableToCreateSymLink;
-                    try d.errors.append(d.allocator, .{ .unable_to_create_sym_link = .{
-                        .code = err,
-                        .file_name = try d.allocator.dupe(u8, file_name),
-                        .link_name = try d.allocator.dupe(u8, link_name),
-                    } });
+                createDirAndSymlink(io, dir, link_name, file_name) catch |err| switch (err) {
+                    error.Canceled => |e| return e,
+                    else => |e| {
+                        const d = options.diagnostics orelse return error.UnableToCreateSymLink;
+                        try d.errors.append(d.allocator, .{ .unable_to_create_sym_link = .{
+                            .code = e,
+                            .file_name = try d.allocator.dupe(u8, file_name),
+                            .link_name = try d.allocator.dupe(u8, link_name),
+                        } });
+                    },
                 };
             },
         }
@@ -779,7 +881,7 @@ test PaxIterator {
             .attrs = &[_]Attr{
                 .{ .kind = .path, .value = "name" },
             },
-            .err = error.UnexpectedEndOfStream,
+            .err = error.EndOfStream,
         },
         .{ // too long size of the second key-value pair
             .data =
@@ -791,7 +893,7 @@ test PaxIterator {
             .attrs = &[_]Attr{
                 .{ .kind = .path, .value = "name" },
             },
-            .err = error.UnexpectedEndOfStream,
+            .err = error.EndOfStream,
         },
 
         .{ // too long size of the second key-value pair
@@ -1190,7 +1292,7 @@ test "executable bit" {
         var reader: Io.Reader = .fixed(data);
 
         var tmp = testing.tmpDir(.{ .follow_symlinks = false });
-        //defer tmp.cleanup();
+        defer tmp.cleanup();
 
         extract(io, tmp.dir, &reader, .{
             .strip_components = 1,
@@ -1221,8 +1323,31 @@ test "executable bit" {
     }
 }
 
+test "extract prevents symlinks from allowing file system access outside the root dir" {
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var tar_buffer: [5000]u8 = undefined;
+    const tar_input_bytes = t: {
+        var fixed_writer: Io.Writer = .fixed(&tar_buffer);
+
+        var writer: Writer = .{
+            .underlying_writer = &fixed_writer,
+        };
+        try writer.writeLink("a", "/", .{});
+        try writer.writeFileBytes("a/b.txt", "contents", .{});
+        break :t fixed_writer.buffered();
+    };
+
+    var fixed_reader: Io.Reader = .fixed(tar_input_bytes);
+    try testing.expectError(error.TarLinkTargetOutsideStrippedPrefix, extract(io, tmp.dir, &fixed_reader, .{}));
+}
+
 test {
     _ = @import("tar/test.zig");
     _ = Writer;
     _ = Diagnostics;
+    _ = Header;
 }
