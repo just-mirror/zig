@@ -577,12 +577,10 @@ pub const Location = union(enum) {
 };
 
 pub const RunError = error{
-    OutOfMemory,
-    Canceled,
     /// This error code is intended to be handled by inspecting the
     /// `error_bundle` field.
     FetchFailed,
-};
+} || Io.Cancelable || Allocator.Error;
 
 pub fn run(f: *Fetch) RunError!void {
     const job_queue = f.job_queue;
@@ -1606,8 +1604,7 @@ fn unpackTarball(f: *Fetch, out_dir: Io.Dir, reader: *Io.Reader) RunError!Unpack
 
     var diagnostics: std.tar.Diagnostics = .{ .allocator = arena };
 
-    std.tar.extract(io, out_dir, reader, .{
-        .diagnostics = &diagnostics,
+    std.tar.extractDiagnostics(io, out_dir, reader, &diagnostics, .{
         .strip_components = 0,
         .mode_mode = .ignore,
         .exclude_empty_directories = true,
@@ -1621,7 +1618,9 @@ fn unpackTarball(f: *Fetch, out_dir: Io.Dir, reader: *Io.Reader) RunError!Unpack
         try res.allocErrors(arena, diagnostics.errors.items.len, "unable to unpack tarball");
         for (diagnostics.errors.items) |item| {
             switch (item) {
-                .unable_to_create_file => |i| res.unableToCreateFile(stripRoot(i.file_name, res.root_dir), i.code),
+                .create_file_failed => |i| res.unableToCreateFile(stripRoot(i.path, res.root_dir), i.code),
+                .create_dir_path_failed => |i| res.createDirPathFailed(stripRoot(i.path, res.root_dir), i.code),
+                .writing_file_failed => |i| res.writingFileFailed(stripRoot(i.path, res.root_dir), i.code),
                 .unable_to_create_sym_link => |i| res.unableToCreateSymLink(stripRoot(i.file_name, res.root_dir), i.link_name, i.code),
                 .unsupported_file_type => |i| res.unsupportedFileType(stripRoot(i.file_name, res.root_dir), @backingInt(i.file_type)),
                 .components_outside_stripped_prefix => unreachable, // unreachable with strip_components = 0
@@ -2307,9 +2306,17 @@ const UnpackResult = struct {
             file_name: []const u8,
             link_name: []const u8,
         },
-        unable_to_create_file: struct {
+        create_file_failed: struct {
             code: anyerror,
-            file_name: []const u8,
+            path: []const u8,
+        },
+        create_dir_path_failed: struct {
+            code: anyerror,
+            path: []const u8,
+        },
+        writing_file_failed: struct {
+            code: anyerror,
+            path: []const u8,
         },
         unsupported_file_type: struct {
             file_name: []const u8,
@@ -2318,7 +2325,9 @@ const UnpackResult = struct {
 
         fn excluded(self: Error, filter: Filter) bool {
             const file_name = switch (self) {
-                .unable_to_create_file => |info| info.file_name,
+                .create_file_failed => |info| info.path,
+                .create_dir_path_failed => |info| info.path,
+                .writing_file_failed => |info| info.path,
                 .unable_to_create_sym_link => |info| info.file_name,
                 .unsupported_file_type => |info| info.file_name,
             };
@@ -2335,10 +2344,26 @@ const UnpackResult = struct {
         return self.errors_count > 0;
     }
 
-    fn unableToCreateFile(self: *UnpackResult, file_name: []const u8, err: anyerror) void {
-        self.errors[self.errors_count] = .{ .unable_to_create_file = .{
+    fn unableToCreateFile(self: *UnpackResult, path: []const u8, err: anyerror) void {
+        self.errors[self.errors_count] = .{ .create_file_failed = .{
             .code = err,
-            .file_name = file_name,
+            .path = path,
+        } };
+        self.errors_count += 1;
+    }
+
+    fn createDirPathFailed(self: *UnpackResult, path: []const u8, err: anyerror) void {
+        self.errors[self.errors_count] = .{ .create_dir_path_failed = .{
+            .code = err,
+            .path = path,
+        } };
+        self.errors_count += 1;
+    }
+
+    fn writingFileFailed(self: *UnpackResult, path: []const u8, err: anyerror) void {
+        self.errors[self.errors_count] = .{ .writing_file_failed = .{
+            .code = err,
+            .path = path,
         } };
         self.errors_count += 1;
     }
@@ -2388,11 +2413,19 @@ const UnpackResult = struct {
                         }),
                     }));
                 },
-                .unable_to_create_file => |info| {
+                .create_file_failed => |info| {
                     eb.extra.items[note_i] = @backingInt(try eb.addErrorMessage(.{
-                        .msg = try eb.printString("unable to create file {q}: {t}", .{
-                            info.file_name, info.code,
-                        }),
+                        .msg = try eb.printString("failed to create file {q}: {t}", .{ info.path, info.code }),
+                    }));
+                },
+                .create_dir_path_failed => |info| {
+                    eb.extra.items[note_i] = @backingInt(try eb.addErrorMessage(.{
+                        .msg = try eb.printString("failed to create file {q}: {t}", .{ info.path, info.code }),
+                    }));
+                },
+                .writing_file_failed => |info| {
+                    eb.extra.items[note_i] = @backingInt(try eb.addErrorMessage(.{
+                        .msg = try eb.printString("failed to create file {q}: {t}", .{ info.path, info.code }),
                     }));
                 },
                 .unsupported_file_type => |info| {
