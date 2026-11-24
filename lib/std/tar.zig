@@ -153,8 +153,6 @@ pub const ExtractOptions = struct {
     mode_mode: ModeMode = .executable_bit_only,
     /// Prevents creation of empty directories.
     exclude_empty_directories: bool = false,
-    /// Collects error messages during unpacking
-    diagnostics: ?*Diagnostics = null,
 
     pub const ModeMode = enum {
         /// The mode from the tar file is completely ignored. Files are created
@@ -340,7 +338,6 @@ pub const FileKind = enum {
 /// Iterator over entries in the tar file represented by reader.
 pub const Iterator = struct {
     reader: *Io.Reader,
-    diagnostics: ?*Diagnostics = null,
 
     // buffers for heeader and file attributes
     header_buffer: [Header.SIZE]u8 = undefined,
@@ -359,8 +356,6 @@ pub const Iterator = struct {
         file_name_buffer: []u8,
         /// Use a buffer with length `std.fs.max_path_bytes` to match file system capabilities.
         link_name_buffer: []u8,
-        /// Collects error messages during unpacking
-        diagnostics: ?*Diagnostics = null,
     };
 
     /// Iterates over files in tar archive.
@@ -368,7 +363,6 @@ pub const Iterator = struct {
     pub fn init(reader: *Io.Reader, options: Options) Iterator {
         return .{
             .reader = reader,
-            .diagnostics = options.diagnostics,
             .file_name_buffer = options.file_name_buffer,
             .link_name_buffer = options.link_name_buffer,
         };
@@ -416,20 +410,34 @@ pub const Iterator = struct {
         return @intCast(block_rounded - size);
     }
 
-    pub const NextError = ReadHeaderError || error{
+    const NextBaseError = ReadHeaderError || error{
         TarHeadersTooBig,
-        /// Unreachable if diagnostics is provided.
-        TarUnsupportedHeader,
-        /// Unreachable if diagnostics is not provided.
-        OutOfMemory,
     } || Header.LinkNameError || Header.SizeError || PaxIterator.NextError || PaxIterator.Attribute.ValueError;
+
+    pub const NextError = NextBaseError || error{TarUnsupportedHeader};
+
+    pub fn next(it: *Iterator) NextError!?File {
+        return nextInner(it, null) catch |err| switch (err) {
+            error.OutOfMemory => unreachable,
+            else => |e| return e,
+        };
+    }
+
+    pub const NextDiagosticsError = NextBaseError || Allocator.Error;
+
+    pub fn nextDiagnostics(it: *Iterator, diagnostics: *Diagnostics) NextDiagosticsError!?File {
+        return nextInner(it, diagnostics) catch |err| switch (err) {
+            error.TarUnsupportedHeader => unreachable,
+            else => |e| return e,
+        };
+    }
 
     /// Iterates through the tar archive one file system entry at a time.
     ///
     /// Internally, the tar format uses extra entries to add meta data that describes the next file.
     /// As such, this function iterates through one or more archive entries until it collects all
     /// attributes for one file system entry.
-    pub fn next(it: *Iterator) NextError!?File {
+    fn nextInner(it: *Iterator, diagnostics: ?*Diagnostics) (NextError || Allocator.Error)!?File {
         if (it.unread_file_bytes > 0) {
             // If file content was not consumed by caller
             try it.reader.discardAll64(it.unread_file_bytes);
@@ -504,7 +512,7 @@ pub const Iterator = struct {
                 },
                 // All other are unsupported header types
                 else => {
-                    const d = it.diagnostics orelse return error.TarUnsupportedHeader;
+                    const d = diagnostics orelse return error.TarUnsupportedHeader;
                     try d.errors.append(d.allocator, .{ .unsupported_file_type = .{
                         .file_name = try d.allocator.dupe(u8, header.name()),
                         .file_type = kind,
@@ -635,25 +643,70 @@ pub const PaxIterator = struct {
 };
 
 pub const ExtractError = error{
-    /// If diagnostics is provided, this error is unreachable.
     TarComponentsOutsideStrippedPrefix,
-    /// If diagnostics is provided, this error is unreachable.
     TarLinkTargetOutsideStrippedPrefix,
-    /// If diagnostics is provided, this error is unreachable.
     UnableToCreateSymLink,
-    /// If diagnostics is provided, this error is unreachable.
     CreateDirPathFailed,
-    /// If diagnostics is provided, this error is unreachable.
     CreateFilePathFailed,
-    /// If diagnostics is provided, this error is unreachable.
     StreamFileFailed,
-    /// Unreachable if diagnostics is not provided.
-    OutOfMemory,
 } || Iterator.NextError || Io.Cancelable;
+
+/// Ingests tar file from `reader`, populating file contents within `dir`.
+///
+/// If any file would be extracted outside of `dir`, an error is returned instead.
+///
+/// The error set is coarse-grained, does not require memory allocation, and early returns on first
+/// error encountered.
+///
+/// Related:
+/// * `extractDiagnostics`
+pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions) ExtractError!void {
+    return extractInner(io, dir, reader, null, options) catch |err| switch (err) {
+        else => |e| return e,
+        error.OutOfMemory => unreachable,
+    };
+}
+
+pub const ExtractDiagnosticsError = Iterator.NextDiagosticsError || Io.Cancelable;
+
+/// Ingests tar file from `reader`, populating file contents within `dir`.
+///
+/// Some kinds of errors are allocated into `diagnostics`. Those errors do not cause early-return of
+/// the function.
+///
+/// If any file would be extracted outside of `dir`, an error is inserted into `diagnostics`
+/// instead.
+///
+/// Related:
+/// * `extract`
+pub fn extractDiagnostics(
+    io: Io,
+    dir: Io.Dir,
+    reader: *Io.Reader,
+    diagnostics: *Diagnostics,
+    options: ExtractOptions,
+) ExtractDiagnosticsError!void {
+    return extractInner(io, dir, reader, diagnostics, options) catch |err| switch (err) {
+        else => |e| return e,
+        error.TarUnsupportedHeader => unreachable,
+        error.TarComponentsOutsideStrippedPrefix => unreachable,
+        error.TarLinkTargetOutsideStrippedPrefix => unreachable,
+        error.UnableToCreateSymLink => unreachable,
+        error.CreateDirPathFailed => unreachable,
+        error.CreateFilePathFailed => unreachable,
+        error.StreamFileFailed => unreachable,
+    };
+}
 
 /// Ingests tar file from `reader`, populating file contents within `dir`. If any file would be
 /// extracted outside of `dir`, an error is return instead.
-pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions) ExtractError!void {
+fn extractInner(
+    io: Io,
+    dir: Io.Dir,
+    reader: *Io.Reader,
+    diagnostics: ?*Diagnostics,
+    options: ExtractOptions,
+) (ExtractError || Allocator.Error)!void {
     var file_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var link_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var sanitize_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -661,22 +714,19 @@ pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions)
     var it: Iterator = .init(reader, .{
         .file_name_buffer = &file_name_buffer,
         .link_name_buffer = &link_name_buffer,
-        .diagnostics = options.diagnostics,
     });
 
-    while (try it.next()) |file| {
+    while (try it.nextInner(diagnostics)) |file| {
         const n = sanitizePath(&sanitize_buffer, file.name, options.strip_components) catch 0;
         if (n == 0 and file.kind != .directory) {
-            const d = options.diagnostics orelse return error.TarComponentsOutsideStrippedPrefix;
+            const d = diagnostics orelse return error.TarComponentsOutsideStrippedPrefix;
             try d.errors.append(d.allocator, .{ .components_outside_stripped_prefix = .{
                 .file_name = try d.allocator.dupe(u8, file.name),
             } });
             continue;
         }
         const file_name = sanitize_buffer[0..n];
-        if (options.diagnostics) |d| {
-            try d.findRoot(file.kind, file_name);
-        }
+        if (diagnostics) |d| try d.findRoot(file.kind, file_name);
 
         switch (file.kind) {
             .directory => {
@@ -684,7 +734,7 @@ pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions)
                     dir.createDirPath(io, file_name) catch |err| switch (err) {
                         error.Canceled => |e| return e,
                         else => |e| {
-                            const d = options.diagnostics orelse return error.CreateDirPathFailed;
+                            const d = diagnostics orelse return error.CreateDirPathFailed;
                             try d.errors.append(d.allocator, .{ .create_dir_path_failed = .{
                                 .code = e,
                                 .path = try d.allocator.dupe(u8, file_name),
@@ -702,7 +752,7 @@ pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions)
                         error.WriteFailed => switch (file_writer.err.?) {
                             error.Canceled => |e| return e,
                             else => |e| {
-                                const d = options.diagnostics orelse return error.StreamFileFailed;
+                                const d = diagnostics orelse return error.StreamFileFailed;
                                 try d.errors.append(d.allocator, .{ .writing_file_failed = .{
                                     .code = e,
                                     .path = try d.allocator.dupe(u8, file_name),
@@ -713,7 +763,7 @@ pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions)
                     file_writer.flush() catch |err| switch (err) {
                         error.Canceled => |e| return e,
                         else => |e| {
-                            const d = options.diagnostics orelse return error.StreamFileFailed;
+                            const d = diagnostics orelse return error.StreamFileFailed;
                             try d.errors.append(d.allocator, .{ .writing_file_failed = .{
                                 .code = e,
                                 .path = try d.allocator.dupe(u8, file_name),
@@ -723,7 +773,7 @@ pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions)
                 } else |err| switch (err) {
                     error.Canceled => |e| return e,
                     else => |e| {
-                        const d = options.diagnostics orelse return error.CreateFilePathFailed;
+                        const d = diagnostics orelse return error.CreateFilePathFailed;
                         try d.errors.append(d.allocator, .{ .create_file_failed = .{
                             .code = e,
                             .path = try d.allocator.dupe(u8, file_name),
@@ -736,7 +786,7 @@ pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions)
                 createDirAndSymlink(io, dir, link_name, file_name) catch |err| switch (err) {
                     error.Canceled => |e| return e,
                     else => |e| {
-                        const d = options.diagnostics orelse return error.UnableToCreateSymLink;
+                        const d = diagnostics orelse return error.UnableToCreateSymLink;
                         try d.errors.append(d.allocator, .{ .unable_to_create_sym_link = .{
                             .code = e,
                             .file_name = try d.allocator.dupe(u8, file_name),
@@ -1065,6 +1115,7 @@ test Iterator {
     //    example/a/file
     //    example/empty/
 
+    // TODO don't embed test artifacts, construct this with writer API
     const data = @embedFile("tar/testdata/example.tar");
     var reader: Io.Reader = .fixed(data);
 
@@ -1125,6 +1176,7 @@ test extract {
     //    example/a/file
     //    example/empty/
 
+    // TODO don't embed test artifacts, construct this with writer API
     const data = @embedFile("tar/testdata/example.tar");
     var reader: Io.Reader = .fixed(data);
 
@@ -1137,10 +1189,10 @@ test extract {
         .mode_mode = .ignore,
         .strip_components = 1,
         .exclude_empty_directories = true,
-    }) catch |err| {
+    }) catch |err| switch (err) {
         // Skip on platform which don't support symlinks
-        if (err == error.UnableToCreateSymLink) return error.SkipZigTest;
-        return err;
+        error.UnableToCreateSymLink => return error.SkipZigTest,
+        else => |e| return e,
     };
 
     try testing.expectError(error.FileNotFound, dir.statFile(io, "empty", .{}));
@@ -1157,6 +1209,7 @@ test extract {
 
 test "extract root_dir" {
     const io = testing.io;
+    // TODO don't embed test artifacts, construct this with writer API
     const data = @embedFile("tar/testdata/example.tar");
     var reader: Io.Reader = .fixed(data);
 
@@ -1167,14 +1220,9 @@ test "extract root_dir" {
         var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
         defer diagnostics.deinit();
 
-        extract(io, tmp.dir, &reader, .{
+        try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{
             .strip_components = 1,
-            .diagnostics = &diagnostics,
-        }) catch |err| {
-            // Skip on platform which don't support symlinks
-            if (err == error.UnableToCreateSymLink) return error.SkipZigTest;
-            return err;
-        };
+        });
 
         // there is no root_dir
         try testing.expectEqual(0, diagnostics.root_dir.len);
@@ -1189,14 +1237,9 @@ test "extract root_dir" {
         var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
         defer diagnostics.deinit();
 
-        extract(io, tmp.dir, &reader, .{
+        try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{
             .strip_components = 0,
-            .diagnostics = &diagnostics,
-        }) catch |err| {
-            // Skip on platform which don't support symlinks
-            if (err == error.UnableToCreateSymLink) return error.SkipZigTest;
-            return err;
-        };
+        });
 
         // root_dir found
         try testing.expectEqualStrings("example", diagnostics.root_dir);
@@ -1206,6 +1249,7 @@ test "extract root_dir" {
 
 test "findRoot with single file archive" {
     const io = testing.io;
+    // TODO don't embed test artifacts, construct this with writer API
     const data = @embedFile("tar/testdata/22752.tar");
     var reader: Io.Reader = .fixed(data);
 
@@ -1214,13 +1258,14 @@ test "findRoot with single file archive" {
 
     var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
     defer diagnostics.deinit();
-    try extract(io, tmp.dir, &reader, .{ .diagnostics = &diagnostics });
+    try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{});
 
     try testing.expectEqualStrings("", diagnostics.root_dir);
 }
 
 test "findRoot without explicit root dir" {
     const io = testing.io;
+    // TODO don't embed test artifacts, construct this with writer API
     const data = @embedFile("tar/testdata/19820.tar");
     var reader: Io.Reader = .fixed(data);
 
@@ -1229,13 +1274,14 @@ test "findRoot without explicit root dir" {
 
     var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
     defer diagnostics.deinit();
-    try extract(io, tmp.dir, &reader, .{ .diagnostics = &diagnostics });
+    try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{});
 
     try testing.expectEqualStrings("root", diagnostics.root_dir);
 }
 
 test "extract strip_components" {
     const io = testing.io;
+    // TODO don't embed test artifacts, construct this with writer API
     const data = @embedFile("tar/testdata/example.tar");
     var reader: Io.Reader = .fixed(data);
 
@@ -1244,14 +1290,9 @@ test "extract strip_components" {
     var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
     defer diagnostics.deinit();
 
-    extract(io, tmp.dir, &reader, .{
+    try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{
         .strip_components = 3,
-        .diagnostics = &diagnostics,
-    }) catch |err| {
-        // Skip on platform which don't support symlinks
-        if (err == error.UnableToCreateSymLink) return error.SkipZigTest;
-        return err;
-    };
+    });
 
     try testing.expectEqual(2, diagnostics.errors.items.len);
     try testing.expectEqualStrings("example/b/symlink", diagnostics.errors.items[0].components_outside_stripped_prefix.file_name);
@@ -1286,6 +1327,7 @@ test "executable bit" {
 
     const io = testing.io;
     const S = std.posix.S;
+    // TODO don't embed test artifacts, construct this with writer API
     const data = @embedFile("tar/testdata/example.tar");
 
     for ([_]ExtractOptions.ModeMode{ .ignore, .executable_bit_only }) |opt| {
@@ -1298,10 +1340,10 @@ test "executable bit" {
             .strip_components = 1,
             .exclude_empty_directories = true,
             .mode_mode = opt,
-        }) catch |err| {
+        }) catch |err| switch (err) {
             // Skip on platform which don't support symlinks
-            if (err == error.UnableToCreateSymLink) return error.SkipZigTest;
-            return err;
+            error.UnableToCreateSymLink => return error.SkipZigTest,
+            else => |e| return e,
         };
 
         const fs = try tmp.dir.statFile(io, "a/file", .{});
@@ -1350,4 +1392,7 @@ test {
     _ = Writer;
     _ = Diagnostics;
     _ = Header;
+    _ = Iterator;
+    _ = &extract;
+    _ = &extractDiagnostics;
 }
