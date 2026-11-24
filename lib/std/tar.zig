@@ -1365,7 +1365,7 @@ test "executable bit" {
     }
 }
 
-test "extract prevents symlinks from allowing file system access outside the root dir" {
+test "extract prevents symlinks from allowing file system access outside the root dir, absolute" {
     const io = testing.io;
 
     var tmp = testing.tmpDir(.{});
@@ -1379,6 +1379,28 @@ test "extract prevents symlinks from allowing file system access outside the roo
             .underlying_writer = &fixed_writer,
         };
         try writer.writeLink("a", "/", .{});
+        try writer.writeFileBytes("a/b.txt", "contents", .{});
+        break :t fixed_writer.buffered();
+    };
+
+    var fixed_reader: Io.Reader = .fixed(tar_input_bytes);
+    try testing.expectError(error.TarLinkTargetOutsideStrippedPrefix, extract(io, tmp.dir, &fixed_reader, .{}));
+}
+
+test "extract prevents symlinks from allowing file system access outside the root dir, relative" {
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var tar_buffer: [5000]u8 = undefined;
+    const tar_input_bytes = t: {
+        var fixed_writer: Io.Writer = .fixed(&tar_buffer);
+
+        var writer: Writer = .{
+            .underlying_writer = &fixed_writer,
+        };
+        try writer.writeLink("a", "../", .{});
         try writer.writeFileBytes("a/b.txt", "contents", .{});
         break :t fixed_writer.buffered();
     };

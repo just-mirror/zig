@@ -473,7 +473,7 @@ test "should not overwrite existing file" {
     var root = std.testing.tmpDir(.{});
     defer root.cleanup();
     try testing.expectError(
-        error.PathAlreadyExists,
+        error.CreateFilePathFailed,
         tar.extract(io, root.dir, &r, .{ .mode_mode = .ignore, .strip_components = 1 }),
     );
 
