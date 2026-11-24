@@ -4820,15 +4820,19 @@ fn docsCopyModule(
         const root_dir, const sub_path = root.openInfo(&comp.dirs);
         break :d root_dir.openDir(io, sub_path, .{ .iterate = true });
     } catch |err| {
-        return comp.lockAndSetMiscFailure(.docs_copy, "unable to open directory '{f}': {t}", .{ root.fmt(comp), err });
+        return comp.lockAndSetMiscFailure(.docs_copy, "unable to open directory {qf}: {t}", .{
+            root.fmt(comp), err,
+        });
     };
     defer mod_dir.close(io);
 
     var walker = try mod_dir.walk(comp.gpa);
     defer walker.deinit(io);
 
-    var archiver: std.tar.Writer = .{ .underlying_writer = &tar_file_writer.interface };
-    archiver.prefix = name;
+    var archiver: std.tar.Writer = .{
+        .underlying_writer = &tar_file_writer.interface,
+        .prefix = name,
+    };
 
     var path_buf: std.ArrayList(u8) = .empty;
     defer path_buf.deinit(comp.gpa);
@@ -4845,15 +4849,15 @@ fn docsCopyModule(
             else => continue,
         }
         var file = mod_dir.openFile(io, entry.path, .{}) catch |err| {
-            return comp.lockAndSetMiscFailure(.docs_copy, "unable to open {f}{s}: {t}", .{
+            return comp.lockAndSetMiscFailure(.docs_copy, "opening {f}/{s} failed: {t}", .{
                 root.fmt(comp), entry.path, err,
             });
         };
         defer file.close(io);
-        const stat = try file.stat(io);
-        var file_reader: Io.File.Reader = .initSize(file, io, &buffer, stat.size);
 
-        const posix_path = if (comptime std.fs.path.sep == std.fs.path.sep_posix)
+        var file_reader: Io.File.Reader = .init(file, io, &buffer);
+
+        const posix_path = if (std.fs.path.sep == std.fs.path.sep_posix)
             entry.path
         else blk: {
             path_buf.clearRetainingCapacity();
@@ -4862,8 +4866,8 @@ fn docsCopyModule(
             break :blk path_buf.items;
         };
 
-        archiver.writeFileTimestamp(posix_path, &file_reader, stat.mtime) catch |err| {
-            return comp.lockAndSetMiscFailure(.docs_copy, "unable to archive {f}{s}: {t}", .{
+        archiver.writeFile(posix_path, &file_reader, .{}) catch |err| {
+            return comp.lockAndSetMiscFailure(.docs_copy, "archiving {f}/{s} failed: {t}", .{
                 root.fmt(comp), entry.path, err,
             });
         };
