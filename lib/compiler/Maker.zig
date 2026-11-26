@@ -1300,6 +1300,9 @@ fn configure(graph: *Graph, options: ConfigureOptions) ConfigureError!ScannedCon
                 // a `zig build --cache-poison=ignored`.
                 config_man_allocation.hash.add(options.cache_poison == .ignored);
 
+                // Prevents a false positive cache hit when "--build-file" argument is changed.
+                _ = try config_man_allocation.addInputPath(root_build_src_path, .{});
+
                 break :m &config_man_allocation;
             },
             .poisoned => null,
