@@ -505,7 +505,7 @@ test "case sensitivity" {
 
     tar.extract(io, root.dir, &r, .{ .mode_mode = .ignore, .strip_components = 1 }) catch |err| {
         // on case insensitive fs we fail on overwrite existing file
-        try testing.expectEqual(error.PathAlreadyExists, err);
+        try testing.expectEqual(error.CreateFilePathFailed, err);
         return;
     };
 
