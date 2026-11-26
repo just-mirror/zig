@@ -69,6 +69,10 @@ pub const Diagnostics = struct {
         components_outside_stripped_prefix: struct {
             file_name: []const u8,
         },
+        link_target_escape: struct {
+            file_name: []const u8,
+            link_name: []const u8,
+        },
     };
 
     fn findRoot(d: *Diagnostics, kind: FileKind, path: []const u8) Allocator.Error!void {
@@ -135,6 +139,10 @@ pub const Diagnostics = struct {
                 },
                 .components_outside_stripped_prefix => |info| {
                     d.allocator.free(info.file_name);
+                },
+                .link_target_escape => |info| {
+                    d.allocator.free(info.file_name);
+                    d.allocator.free(info.link_name);
                 },
             }
         }
@@ -648,7 +656,13 @@ pub const PaxIterator = struct {
 };
 
 pub const ExtractError = error{
+    /// Occurs when a file system entry in the archive would be extracted to somewhere above the
+    /// root directory chosen for extraction. This error can occur when strip_components is zero,
+    /// for example if the archive contains an entry with the path "../foo" or "/foo".
     TarComponentsOutsideStrippedPrefix,
+    /// Occurs when a symlink entry in the archive would point to a path somewhere above the root
+    /// directory chosen for extraction. This error can occur when strip_components is zero, for
+    /// example if the symlink contains the path "../foo" or "/foo".
     TarLinkTargetOutsideStrippedPrefix,
     UnableToCreateSymLink,
     CreateDirPathFailed,
@@ -788,6 +802,16 @@ fn extractInner(
             },
             .sym_link => {
                 const link_name = file.link_name;
+                validateLinkName(file_name, link_name) catch |err| switch (err) {
+                    error.TarLinkTargetOutsideStrippedPrefix => |e| {
+                        const d = diagnostics orelse return e;
+                        try d.errors.append(d.allocator, .{ .link_target_escape = .{
+                            .file_name = try d.allocator.dupe(u8, file_name),
+                            .link_name = try d.allocator.dupe(u8, link_name),
+                        } });
+                        continue;
+                    },
+                };
                 createDirAndSymlink(io, dir, link_name, file_name) catch |err| switch (err) {
                     error.Canceled => |e| return e,
                     else => |e| {
@@ -861,6 +885,30 @@ fn sanitizePath(buffer: []u8, path: []const u8, strip_components: u32) error{Inv
     return i;
 }
 
+fn validateLinkName(file_name: []const u8, link_name: []const u8) error{TarLinkTargetOutsideStrippedPrefix}!void {
+    if (std.mem.startsWith(u8, link_name, "/")) return error.TarLinkTargetOutsideStrippedPrefix;
+
+    // Count the number of components of file_name which is where the link starts from.
+    var n: usize = 0;
+    {
+        var it = std.mem.tokenizeScalar(u8, file_name, '/');
+        while (it.next() != null) n += 1;
+        assert(n != 0); // Caught by file path sanitization.
+    }
+
+    var it = std.mem.tokenizeScalar(u8, link_name, '/');
+    while (it.next()) |component| {
+        if (std.mem.eql(u8, component, ".")) {
+            continue;
+        } else if (std.mem.eql(u8, component, "..")) {
+            if (n == 1) return error.TarLinkTargetOutsideStrippedPrefix;
+            n -= 1;
+        } else {
+            n += 1;
+        }
+    }
+}
+
 fn testSanitizePath(expected: []const u8, input: []const u8, strip: u32) !void {
     var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const result = buffer[0..try sanitizePath(&buffer, input, strip)];
@@ -879,10 +927,22 @@ test sanitizePath {
     try testSanitizePath("c", "a/b/c", 2);
     try testSanitizePath("", "a/b/c", 3);
     try testSanitizePath("", "a/b/c/../../..", 0);
+    try testSanitizePathError(error.Invalid, "/", 0);
+    try testSanitizePathError(error.Invalid, "//a", 0);
     try testSanitizePathError(error.Invalid, "a/b/c", 4);
     try testSanitizePathError(error.Invalid, "..", 0);
     try testSanitizePathError(error.Invalid, "a/b/../../..", 0);
     try testSanitizePathError(error.Invalid, "a/b/../..", 1);
+}
+
+test validateLinkName {
+    try validateLinkName("a", "b");
+    try validateLinkName("a/b", "../c");
+
+    try testing.expectError(error.TarLinkTargetOutsideStrippedPrefix, validateLinkName("a", ".."));
+    try testing.expectError(error.TarLinkTargetOutsideStrippedPrefix, validateLinkName("a", "/"));
+    try testing.expectError(error.TarLinkTargetOutsideStrippedPrefix, validateLinkName("a", "//a"));
+    try testing.expectError(error.TarLinkTargetOutsideStrippedPrefix, validateLinkName("a/b/", "../../a/b"));
 }
 
 test PaxIterator {

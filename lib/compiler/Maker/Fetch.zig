@@ -1623,7 +1623,12 @@ fn unpackTarball(f: *Fetch, out_dir: Io.Dir, reader: *Io.Reader) RunError!Unpack
                 .writing_file_failed => |i| res.writingFileFailed(stripRoot(i.path, res.root_dir), i.code),
                 .unable_to_create_sym_link => |i| res.unableToCreateSymLink(stripRoot(i.file_name, res.root_dir), i.link_name, i.code),
                 .unsupported_file_type => |i| res.unsupportedFileType(stripRoot(i.file_name, res.root_dir), @backingInt(i.file_type)),
-                .components_outside_stripped_prefix => unreachable, // unreachable with strip_components = 0
+                .components_outside_stripped_prefix => {
+                    // Safe to skip because, by definition, if it is outside the tarball prefix, it
+                    // cannot be included in the path filter.
+                    continue;
+                },
+                .link_target_escape => |i| res.linkTargetEscape(stripRoot(i.file_name, res.root_dir), i.link_name),
             }
         }
     }
@@ -2306,6 +2311,10 @@ const UnpackResult = struct {
             file_name: []const u8,
             link_name: []const u8,
         },
+        link_target_escape: struct {
+            file_name: []const u8,
+            link_name: []const u8,
+        },
         create_file_failed: struct {
             code: anyerror,
             path: []const u8,
@@ -2330,6 +2339,7 @@ const UnpackResult = struct {
                 .writing_file_failed => |info| info.path,
                 .unable_to_create_sym_link => |info| info.file_name,
                 .unsupported_file_type => |info| info.file_name,
+                .link_target_escape => |info| info.file_name,
             };
             return !filter.includePath(file_name);
         }
@@ -2377,6 +2387,14 @@ const UnpackResult = struct {
         self.errors_count += 1;
     }
 
+    fn linkTargetEscape(self: *UnpackResult, file_name: []const u8, link_name: []const u8) void {
+        self.errors[self.errors_count] = .{ .link_target_escape = .{
+            .file_name = file_name,
+            .link_name = link_name,
+        } };
+        self.errors_count += 1;
+    }
+
     fn unsupportedFileType(self: *UnpackResult, file_name: []const u8, file_type: u8) void {
         self.errors[self.errors_count] = .{ .unsupported_file_type = .{
             .file_name = file_name,
@@ -2410,6 +2428,13 @@ const UnpackResult = struct {
                     eb.extra.items[note_i] = @backingInt(try eb.addErrorMessage(.{
                         .msg = try eb.printString("unable to create symlink from {q} to {q}: {t}", .{
                             info.file_name, info.link_name, info.code,
+                        }),
+                    }));
+                },
+                .link_target_escape => |info| {
+                    eb.extra.items[note_i] = @backingInt(try eb.addErrorMessage(.{
+                        .msg = try eb.printString("symlink {q} target {q} escapes the archive", .{
+                            info.file_name, info.link_name,
                         }),
                     }));
                 },
