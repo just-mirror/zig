@@ -140,14 +140,14 @@ pub const ExtractOptions = struct {
     };
 };
 
-const Header = struct {
-    const SIZE = 512;
-    const MAX_NAME_SIZE = 100 + 1 + 155; // name(100) + separator(1) + prefix(155)
-    const LINK_NAME_SIZE = 100;
+pub const Header = struct {
+    pub const SIZE = 512;
+    pub const MAX_NAME_SIZE = 100 + 1 + 155; // name(100) + separator(1) + prefix(155)
+    pub const LINK_NAME_SIZE = 100;
 
     bytes: *const [SIZE]u8,
 
-    const Kind = enum(u8) {
+    pub const Kind = enum(u8) {
         normal_alias = 0,
         normal = '0',
         hard_link = '1',
@@ -270,9 +270,9 @@ const Header = struct {
         signed: i64,
     };
 
-    // Sum of all bytes in the header block. The chksum field is treated as if
-    // it were filled with spaces (ASCII 32).
-    fn computeChksum(header: Header) Chksums {
+    /// Sum of all bytes in the header block. The chksum field is treated as if it were filled with
+    /// spaces (ASCII 32).
+    pub fn computeChksum(header: Header) Chksums {
         var cs: Chksums = .{ .signed = 0, .unsigned = 0 };
         for (header.bytes, 0..) |v, i| {
             const b = if (148 <= i and i < 156) 32 else v; // Treating chksum bytes as spaces.
@@ -1043,90 +1043,6 @@ test PaxIterator {
     }
 }
 
-test "header parse size" {
-    const cases = [_]struct {
-        in: []const u8,
-        want: u64 = 0,
-        err: ?anyerror = null,
-    }{
-        // Test base-256 (binary) encoded values.
-        .{ .in = "", .want = 0 },
-        .{ .in = "\x80", .want = 0 },
-        .{ .in = "\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01", .want = 1 },
-        .{ .in = "\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02", .want = 0x0102 },
-        .{ .in = "\x80\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08", .want = 0x0102030405060708 },
-        .{ .in = "\x80\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09", .err = error.TarNumericValueTooBig },
-        .{ .in = "\x80\x00\x00\x00\x07\x76\xa2\x22\xeb\x8a\x72\x61", .want = 537795476381659745 },
-        .{ .in = "\x80\x80\x80\x00\x01\x02\x03\x04\x05\x06\x07\x08", .err = error.TarNumericValueTooBig },
-
-        // // Test base-8 (octal) encoded values.
-        .{ .in = "00000000227\x00", .want = 0o227 },
-        .{ .in = "  000000227\x00", .want = 0o227 },
-        .{ .in = "00000000228\x00", .err = error.TarHeader },
-        .{ .in = "11111111111\x00", .want = 0o11111111111 },
-    };
-
-    for (cases) |case| {
-        var bytes: [Header.SIZE]u8 = @splat(0);
-        @memcpy(bytes[124 .. 124 + case.in.len], case.in);
-        var header = Header{ .bytes = &bytes };
-        if (case.err) |err| {
-            try testing.expectError(err, header.size());
-        } else {
-            try testing.expectEqual(case.want, try header.size());
-        }
-    }
-}
-
-test "header parse mode" {
-    const cases = [_]struct {
-        in: []const u8,
-        want: u64 = 0,
-        err: ?anyerror = null,
-    }{
-        .{ .in = "0000644\x00", .want = 0o644 },
-        .{ .in = "0000777\x00", .want = 0o777 },
-        .{ .in = "7777777\x00", .want = 0o7777777 },
-        .{ .in = "7777778\x00", .err = error.TarHeader },
-        .{ .in = "77777777", .want = 0o77777777 },
-        .{ .in = "777777777777", .want = 0o77777777 },
-    };
-    for (cases) |case| {
-        var bytes: [Header.SIZE]u8 = @splat(0);
-        @memcpy(bytes[100 .. 100 + case.in.len], case.in);
-        var header = Header{ .bytes = &bytes };
-        if (case.err) |err| {
-            try testing.expectError(err, header.mode());
-        } else {
-            try testing.expectEqual(case.want, try header.mode());
-        }
-    }
-}
-
-test "create file and symlink" {
-    const io = testing.io;
-
-    var root = testing.tmpDir(.{});
-    defer root.cleanup();
-
-    var file = try createDirAndFile(io, root.dir, "file1", .default_file);
-    file.close(io);
-    file = try createDirAndFile(io, root.dir, "a/b/c/file2", .default_file);
-    file.close(io);
-
-    createDirAndSymlink(io, root.dir, "a/b/c/file2", "symlink1") catch |err| switch (err) {
-        // On Windows, symlinks require developer mode/admin privileges and the underlying filesystem must support symlinks
-        error.AccessDenied, error.PermissionDenied, error.FileSystem => if (builtin.os.tag == .windows) return error.SkipZigTest else return err,
-        else => return err,
-    };
-    try createDirAndSymlink(io, root.dir, "../../../file1", "d/e/f/symlink2");
-
-    // Danglink symlnik, file created later
-    try createDirAndSymlink(io, root.dir, "../../../g/h/i/file4", "j/k/l/symlink3");
-    file = try createDirAndFile(io, root.dir, "g/h/i/file4", .default_file);
-    file.close(io);
-}
-
 test Iterator {
     // Example tar file is created from this tree structure:
     // $ tree example
@@ -1239,110 +1155,6 @@ test extract {
     );
 }
 
-test "extract root_dir" {
-    const io = testing.io;
-    // TODO don't embed test artifacts, construct this with writer API
-    const data = @embedFile("tar/testdata/example.tar");
-    var reader: Io.Reader = .fixed(data);
-
-    var arena_allocator = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_allocator.deinit();
-    const arena = arena_allocator.allocator();
-
-    // with strip_components = 1
-    {
-        var tmp = testing.tmpDir(.{ .follow_symlinks = false });
-        defer tmp.cleanup();
-        var diagnostics: Diagnostics = .{ .arena = arena };
-
-        try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{
-            .strip_components = 1,
-        });
-
-        // there is no root_dir
-        try testing.expectEqual(0, diagnostics.root_dir.len);
-        try testing.expectEqual(5, diagnostics.entries);
-    }
-
-    // with strip_components = 0
-    {
-        reader = .fixed(data);
-        var tmp = testing.tmpDir(.{ .follow_symlinks = false });
-        defer tmp.cleanup();
-        var diagnostics: Diagnostics = .{ .arena = arena };
-
-        try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{
-            .strip_components = 0,
-        });
-
-        // root_dir found
-        try testing.expectEqualStrings("example", diagnostics.root_dir);
-        try testing.expectEqual(6, diagnostics.entries);
-    }
-}
-
-test "findRoot with single file archive" {
-    const io = testing.io;
-    // TODO don't embed test artifacts, construct this with writer API
-    const data = @embedFile("tar/testdata/22752.tar");
-    var reader: Io.Reader = .fixed(data);
-
-    var arena_allocator = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_allocator.deinit();
-    const arena = arena_allocator.allocator();
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var diagnostics: Diagnostics = .{ .arena = arena };
-    try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{});
-
-    try testing.expectEqualStrings("", diagnostics.root_dir);
-}
-
-test "findRoot without explicit root dir" {
-    const io = testing.io;
-    // TODO don't embed test artifacts, construct this with writer API
-    const data = @embedFile("tar/testdata/19820.tar");
-    var reader: Io.Reader = .fixed(data);
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var arena_allocator = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_allocator.deinit();
-    const arena = arena_allocator.allocator();
-
-    var diagnostics: Diagnostics = .{ .arena = arena };
-    try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{});
-
-    try testing.expectEqualStrings("root", diagnostics.root_dir);
-}
-
-test "extract strip_components" {
-    const io = testing.io;
-    // TODO don't embed test artifacts, construct this with writer API
-    const data = @embedFile("tar/testdata/example.tar");
-    var reader: Io.Reader = .fixed(data);
-
-    var arena_allocator = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_allocator.deinit();
-    const arena = arena_allocator.allocator();
-
-    var tmp = testing.tmpDir(.{ .follow_symlinks = false });
-    defer tmp.cleanup();
-
-    var diagnostics: Diagnostics = .{ .arena = arena };
-
-    try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{
-        .strip_components = 3,
-    });
-
-    try testing.expectEqual(2, diagnostics.errors.items.len);
-    try testing.expectEqualStrings("example/b/symlink", diagnostics.errors.items[0].components_outside_stripped_prefix.file_name);
-    try testing.expectEqualStrings("example/a/file", diagnostics.errors.items[1].components_outside_stripped_prefix.file_name);
-}
-
 fn normalizePath(bytes: []u8) []u8 {
     const canonical_sep = std.fs.path.sep_posix;
     if (std.fs.path.sep == canonical_sep) return bytes;
@@ -1366,91 +1178,28 @@ test filePermissions {
     try testing.expectEqual(Io.File.Permissions.default_file, filePermissions(0o655, .{}));
 }
 
-test "executable bit" {
-    if (!Io.File.Permissions.has_executable_bit) return error.SkipZigTest;
-
-    const io = testing.io;
-    const S = std.posix.S;
-    // TODO don't embed test artifacts, construct this with writer API
-    const data = @embedFile("tar/testdata/example.tar");
-
-    for ([_]ExtractOptions.ModeMode{ .ignore, .executable_bit_only }) |opt| {
-        var reader: Io.Reader = .fixed(data);
-
-        var tmp = testing.tmpDir(.{ .follow_symlinks = false });
-        defer tmp.cleanup();
-
-        extract(io, tmp.dir, &reader, .{
-            .strip_components = 1,
-            .exclude_empty_directories = true,
-            .mode_mode = opt,
-        }) catch |err| switch (err) {
-            // Skip on platform which don't support symlinks
-            error.UnableToCreateSymLink => return error.SkipZigTest,
-            else => |e| return e,
-        };
-
-        const fs = try tmp.dir.statFile(io, "a/file", .{});
-        try testing.expect(fs.kind == .file);
-
-        const mode = fs.permissions.toMode();
-
-        if (opt == .executable_bit_only) {
-            // Executable bit is set for user, group and others
-            try testing.expect(mode & S.IXUSR > 0);
-            try testing.expect(mode & S.IXGRP > 0);
-            try testing.expect(mode & S.IXOTH > 0);
-        }
-        if (opt == .ignore) {
-            try testing.expect(mode & S.IXUSR == 0);
-            try testing.expect(mode & S.IXGRP == 0);
-            try testing.expect(mode & S.IXOTH == 0);
-        }
-    }
-}
-
-test "extract prevents symlinks from allowing file system access outside the root dir, absolute" {
+test "create file and symlink" {
     const io = testing.io;
 
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
+    var root = testing.tmpDir(.{});
+    defer root.cleanup();
 
-    var tar_buffer: [5000]u8 = undefined;
-    const tar_input_bytes = t: {
-        var fixed_writer: Io.Writer = .fixed(&tar_buffer);
+    var file = try createDirAndFile(io, root.dir, "file1", .default_file);
+    file.close(io);
+    file = try createDirAndFile(io, root.dir, "a/b/c/file2", .default_file);
+    file.close(io);
 
-        var writer: Writer = .{
-            .underlying_writer = &fixed_writer,
-        };
-        try writer.writeLink("a", "/", .{});
-        try writer.writeFileBytes("a/b.txt", "contents", .{});
-        break :t fixed_writer.buffered();
+    createDirAndSymlink(io, root.dir, "a/b/c/file2", "symlink1") catch |err| switch (err) {
+        // On Windows, symlinks require developer mode/admin privileges and the underlying filesystem must support symlinks
+        error.AccessDenied, error.PermissionDenied, error.FileSystem => if (builtin.os.tag == .windows) return error.SkipZigTest else return err,
+        else => return err,
     };
+    try createDirAndSymlink(io, root.dir, "../../../file1", "d/e/f/symlink2");
 
-    var fixed_reader: Io.Reader = .fixed(tar_input_bytes);
-    try testing.expectError(error.TarLinkTargetOutsideStrippedPrefix, extract(io, tmp.dir, &fixed_reader, .{}));
-}
-
-test "extract prevents symlinks from allowing file system access outside the root dir, relative" {
-    const io = testing.io;
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var tar_buffer: [5000]u8 = undefined;
-    const tar_input_bytes = t: {
-        var fixed_writer: Io.Writer = .fixed(&tar_buffer);
-
-        var writer: Writer = .{
-            .underlying_writer = &fixed_writer,
-        };
-        try writer.writeLink("a", "../", .{});
-        try writer.writeFileBytes("a/b.txt", "contents", .{});
-        break :t fixed_writer.buffered();
-    };
-
-    var fixed_reader: Io.Reader = .fixed(tar_input_bytes);
-    try testing.expectError(error.TarLinkTargetOutsideStrippedPrefix, extract(io, tmp.dir, &fixed_reader, .{}));
+    // Danglink symlnik, file created later
+    try createDirAndSymlink(io, root.dir, "../../../g/h/i/file4", "j/k/l/symlink3");
+    file = try createDirAndFile(io, root.dir, "g/h/i/file4", .default_file);
+    file.close(io);
 }
 
 test {
@@ -1459,6 +1208,4 @@ test {
     _ = Diagnostics;
     _ = Header;
     _ = Iterator;
-    _ = &extract;
-    _ = &extractDiagnostics;
 }
