@@ -627,7 +627,7 @@ pub fn main(init: process.Init.Minimal) !void {
         .build_file = build_file,
     }) catch |err| switch (err) {
         error.BuildZigNotFound => {
-            if (help_menu) printUsageWithoutConfiguration(&graph, "build.zig not found");
+            if (help_menu) printUsageWithoutConfiguration(&graph, std.zig.build_zig_basename ++ " not found");
             process.exit(1);
         },
         else => |e| return e,
@@ -1095,7 +1095,7 @@ pub fn main(init: process.Init.Minimal) !void {
             const can_fs_watch = switch (err) {
                 error.AlreadyReported => false,
                 error.FailedButCacheIntact => c: {
-                    if (help_menu) printUsageWithoutConfiguration(&graph, "build.zig compilation failure");
+                    if (help_menu) printUsageWithoutConfiguration(&graph, std.zig.build_zig_basename ++ " compilation failure");
                     break :c true;
                 },
                 error.StdoutWriteFailed => {
@@ -4629,7 +4629,9 @@ fn findBuildRoot(arena: Allocator, io: Io, options: FindBuildRootOptions) FindBu
         if (Io.Dir.cwd().access(io, joined_path, .{})) |_| {
             const dir = if (dirname) |d|
                 Io.Dir.cwd().openDir(io, d, .{}) catch |err| {
-                    fatal("unable to open directory while searching for build.zig file, {q}: {t}", .{ d, err });
+                    fatal("unable to open directory while searching for {s} file, {q}: {t}", .{
+                        std.zig.build_zig_basename, d, err,
+                    });
                 }
             else
                 Io.Dir.cwd();
@@ -4646,12 +4648,16 @@ fn findBuildRoot(arena: Allocator, io: Io, options: FindBuildRootOptions) FindBu
                 dirname = Dir.path.dirname(dirname orelse options.cwd_path) orelse {
                     log.info("initialize {s} template file with \"zig init\"", .{std.zig.build_zig_basename});
                     log.info("see \"zig --help\" for more options", .{});
-                    log.err("no build.zig file found, in the current directory or any parent directories", .{});
+                    log.err("no {s} file found, in the current directory or any parent directories", .{
+                        std.zig.build_zig_basename,
+                    });
                     return error.BuildZigNotFound;
                 };
                 continue;
             },
-            else => |e| fatal("accessing {q} while searching for build.zig file failed: {t}", .{ joined_path, e }),
+            else => |e| fatal("accessing {q} while searching for {s} file failed: {t}", .{
+                joined_path, std.zig.build_zig_basename, e,
+            }),
         }
     }
 }
