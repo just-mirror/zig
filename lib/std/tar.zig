@@ -30,8 +30,7 @@ pub const Writer = @import("tar/Writer.zig");
 /// added to this structure. The API user must check the errors in diagnostics to know whether the
 /// operation succeeded or failed.
 pub const Diagnostics = struct {
-    // TODO make this be an arena and simplify deinit
-    allocator: Allocator,
+    arena: Allocator,
     errors: std.ArrayList(Error) = .empty,
 
     entries: usize = 0,
@@ -82,12 +81,12 @@ pub const Diagnostics = struct {
         d.entries += 1;
         const root_dir = rootDir(path, kind);
         if (d.entries == 1) {
-            d.root_dir = try d.allocator.dupe(u8, root_dir);
+            d.root_dir = try d.arena.dupe(u8, root_dir);
             return;
         }
         if (d.root_dir.len == 0 or mem.eql(u8, root_dir, d.root_dir))
             return;
-        d.allocator.free(d.root_dir);
+        d.arena.free(d.root_dir);
         d.root_dir = "";
     }
 
@@ -117,39 +116,6 @@ pub const Diagnostics = struct {
         try expectEqualStrings("a", rootDir("a/b", .directory));
         try expectEqualStrings("a", rootDir("a/b", .file));
         try expectEqualStrings("a", rootDir("a/b/c", .directory));
-    }
-
-    pub fn deinit(d: *Diagnostics) void {
-        for (d.errors.items) |item| {
-            switch (item) {
-                .unable_to_create_sym_link => |info| {
-                    d.allocator.free(info.file_name);
-                    d.allocator.free(info.link_name);
-                },
-                .create_file_failed => |info| {
-                    d.allocator.free(info.path);
-                },
-                .create_dir_path_failed => |info| {
-                    d.allocator.free(info.path);
-                },
-                .writing_file_failed => |info| {
-                    d.allocator.free(info.path);
-                },
-                .unsupported_file_type => |info| {
-                    d.allocator.free(info.file_name);
-                },
-                .components_outside_stripped_prefix => |info| {
-                    d.allocator.free(info.file_name);
-                },
-                .link_target_escape => |info| {
-                    d.allocator.free(info.file_name);
-                    d.allocator.free(info.link_name);
-                },
-            }
-        }
-        d.errors.deinit(d.allocator);
-        d.allocator.free(d.root_dir);
-        d.* = undefined;
     }
 };
 
@@ -527,8 +493,8 @@ pub const Iterator = struct {
                 // All other are unsupported header types
                 else => {
                     const d = diagnostics orelse return error.TarUnsupportedHeader;
-                    try d.errors.append(d.allocator, .{ .unsupported_file_type = .{
-                        .file_name = try d.allocator.dupe(u8, header.name()),
+                    try d.errors.append(d.arena, .{ .unsupported_file_type = .{
+                        .file_name = try d.arena.dupe(u8, header.name()),
                         .file_type = kind,
                     } });
                     if (kind == .gnu_sparse) {
@@ -740,8 +706,8 @@ fn extractInner(
         const n = sanitizePath(&sanitize_buffer, file.name, options.strip_components) catch 0;
         if (n == 0 and file.kind != .directory) {
             const d = diagnostics orelse return error.TarComponentsOutsideStrippedPrefix;
-            try d.errors.append(d.allocator, .{ .components_outside_stripped_prefix = .{
-                .file_name = try d.allocator.dupe(u8, file.name),
+            try d.errors.append(d.arena, .{ .components_outside_stripped_prefix = .{
+                .file_name = try d.arena.dupe(u8, file.name),
             } });
             continue;
         }
@@ -755,9 +721,9 @@ fn extractInner(
                         error.Canceled => |e| return e,
                         else => |e| {
                             const d = diagnostics orelse return error.CreateDirPathFailed;
-                            try d.errors.append(d.allocator, .{ .create_dir_path_failed = .{
+                            try d.errors.append(d.arena, .{ .create_dir_path_failed = .{
                                 .code = e,
-                                .path = try d.allocator.dupe(u8, file_name),
+                                .path = try d.arena.dupe(u8, file_name),
                             } });
                         },
                     };
@@ -773,9 +739,9 @@ fn extractInner(
                             error.Canceled => |e| return e,
                             else => |e| {
                                 const d = diagnostics orelse return error.StreamFileFailed;
-                                try d.errors.append(d.allocator, .{ .writing_file_failed = .{
+                                try d.errors.append(d.arena, .{ .writing_file_failed = .{
                                     .code = e,
-                                    .path = try d.allocator.dupe(u8, file_name),
+                                    .path = try d.arena.dupe(u8, file_name),
                                 } });
                             },
                         },
@@ -784,9 +750,9 @@ fn extractInner(
                         error.Canceled => |e| return e,
                         else => |e| {
                             const d = diagnostics orelse return error.StreamFileFailed;
-                            try d.errors.append(d.allocator, .{ .writing_file_failed = .{
+                            try d.errors.append(d.arena, .{ .writing_file_failed = .{
                                 .code = e,
-                                .path = try d.allocator.dupe(u8, file_name),
+                                .path = try d.arena.dupe(u8, file_name),
                             } });
                         },
                     };
@@ -794,9 +760,9 @@ fn extractInner(
                     error.Canceled => |e| return e,
                     else => |e| {
                         const d = diagnostics orelse return error.CreateFilePathFailed;
-                        try d.errors.append(d.allocator, .{ .create_file_failed = .{
+                        try d.errors.append(d.arena, .{ .create_file_failed = .{
                             .code = e,
-                            .path = try d.allocator.dupe(u8, file_name),
+                            .path = try d.arena.dupe(u8, file_name),
                         } });
                     },
                 }
@@ -806,9 +772,9 @@ fn extractInner(
                 validateLinkName(file_name, link_name) catch |err| switch (err) {
                     error.TarLinkTargetOutsideStrippedPrefix => |e| {
                         const d = diagnostics orelse return e;
-                        try d.errors.append(d.allocator, .{ .link_target_escape = .{
-                            .file_name = try d.allocator.dupe(u8, file_name),
-                            .link_name = try d.allocator.dupe(u8, link_name),
+                        try d.errors.append(d.arena, .{ .link_target_escape = .{
+                            .file_name = try d.arena.dupe(u8, file_name),
+                            .link_name = try d.arena.dupe(u8, link_name),
                         } });
                         continue;
                     },
@@ -817,10 +783,10 @@ fn extractInner(
                     error.Canceled => |e| return e,
                     else => |e| {
                         const d = diagnostics orelse return error.UnableToCreateSymLink;
-                        try d.errors.append(d.allocator, .{ .unable_to_create_sym_link = .{
+                        try d.errors.append(d.arena, .{ .unable_to_create_sym_link = .{
                             .code = e,
-                            .file_name = try d.allocator.dupe(u8, file_name),
-                            .link_name = try d.allocator.dupe(u8, link_name),
+                            .file_name = try d.arena.dupe(u8, file_name),
+                            .link_name = try d.arena.dupe(u8, link_name),
                         } });
                     },
                 };
@@ -1279,12 +1245,15 @@ test "extract root_dir" {
     const data = @embedFile("tar/testdata/example.tar");
     var reader: Io.Reader = .fixed(data);
 
+    var arena_allocator = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
+
     // with strip_components = 1
     {
         var tmp = testing.tmpDir(.{ .follow_symlinks = false });
         defer tmp.cleanup();
-        var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
-        defer diagnostics.deinit();
+        var diagnostics: Diagnostics = .{ .arena = arena };
 
         try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{
             .strip_components = 1,
@@ -1300,8 +1269,7 @@ test "extract root_dir" {
         reader = .fixed(data);
         var tmp = testing.tmpDir(.{ .follow_symlinks = false });
         defer tmp.cleanup();
-        var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
-        defer diagnostics.deinit();
+        var diagnostics: Diagnostics = .{ .arena = arena };
 
         try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{
             .strip_components = 0,
@@ -1319,11 +1287,14 @@ test "findRoot with single file archive" {
     const data = @embedFile("tar/testdata/22752.tar");
     var reader: Io.Reader = .fixed(data);
 
+    var arena_allocator = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
+
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
-    defer diagnostics.deinit();
+    var diagnostics: Diagnostics = .{ .arena = arena };
     try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{});
 
     try testing.expectEqualStrings("", diagnostics.root_dir);
@@ -1338,8 +1309,11 @@ test "findRoot without explicit root dir" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
-    defer diagnostics.deinit();
+    var arena_allocator = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
+
+    var diagnostics: Diagnostics = .{ .arena = arena };
     try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{});
 
     try testing.expectEqualStrings("root", diagnostics.root_dir);
@@ -1351,10 +1325,14 @@ test "extract strip_components" {
     const data = @embedFile("tar/testdata/example.tar");
     var reader: Io.Reader = .fixed(data);
 
+    var arena_allocator = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
+
     var tmp = testing.tmpDir(.{ .follow_symlinks = false });
     defer tmp.cleanup();
-    var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
-    defer diagnostics.deinit();
+
+    var diagnostics: Diagnostics = .{ .arena = arena };
 
     try extractDiagnostics(io, tmp.dir, &reader, &diagnostics, .{
         .strip_components = 3,

@@ -1602,7 +1602,7 @@ fn unpackTarball(f: *Fetch, out_dir: Io.Dir, reader: *Io.Reader) RunError!Unpack
     const arena = f.arena.allocator();
     const io = f.job_queue.io;
 
-    var diagnostics: std.tar.Diagnostics = .{ .allocator = arena };
+    var diagnostics: std.tar.Diagnostics = .{ .arena = arena };
 
     std.tar.extractDiagnostics(io, out_dir, reader, &diagnostics, .{
         .strip_components = 0,
