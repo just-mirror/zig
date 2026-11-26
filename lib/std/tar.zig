@@ -119,27 +119,6 @@ pub const Diagnostics = struct {
     }
 };
 
-pub const ExtractOptions = struct {
-    /// Number of directory levels to skip when extracting files.
-    strip_components: u32 = 0,
-    /// How to handle the "mode" property of files from within the tar file.
-    /// TODO add another one for setting executable bit based on file contents and ignoring the mode
-    /// from the archive.
-    mode_mode: ModeMode = .executable_bit_only,
-    /// Prevents creation of empty directories.
-    exclude_empty_directories: bool = false,
-
-    pub const ModeMode = enum {
-        /// The mode from the tar file is completely ignored. Files are created
-        /// with the default mode when creating files.
-        ignore,
-        /// The mode from the tar file is inspected for the owner executable bit
-        /// only. This bit is copied to the group and other executable bits.
-        /// Other bits of the mode are left as the default when creating files.
-        executable_bit_only,
-    };
-};
-
 pub const Header = struct {
     pub const SIZE = 512;
     pub const MAX_NAME_SIZE = 100 + 1 + 155; // name(100) + separator(1) + prefix(155)
@@ -636,6 +615,25 @@ pub const ExtractError = error{
     CreateFilePathFailed,
     StreamFileFailed,
 } || Iterator.NextError || Io.Cancelable;
+
+pub const ExtractOptions = struct {
+    /// Number of directory levels to skip when extracting files.
+    strip_components: u32 = 0,
+    /// How to handle the "mode" property of files from within the tar file.
+    mode_mode: ModeMode = .executable_bit_only,
+    /// Prevents creation of empty directories.
+    exclude_empty_directories: bool = false,
+
+    pub const ModeMode = enum {
+        /// The mode from the tar file is completely ignored. Files are created with the default
+        /// mode when creating files.
+        ignore,
+        /// The mode from the tar file is inspected for the owner executable bit only. This bit is
+        /// copied to the group and other executable bits. Other bits of the mode are left as the
+        /// default when creating files.
+        executable_bit_only,
+    };
+};
 
 /// Ingests tar file from `reader`, populating file contents within `dir`.
 ///

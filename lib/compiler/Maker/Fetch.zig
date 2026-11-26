@@ -2229,7 +2229,7 @@ fn depName(f: *const Fetch) []const u8 {
     return if (std.mem.findLastScalar(u8, f.name, '.')) |start| f.name[start + 1 ..] else f.name;
 }
 
-// Detects executable header: ELF or Macho-O magic header or shebang line.
+// Detects executable header: ELF or MachO magic header or shebang line.
 pub const FileHeader = struct {
     header: [4]u8 = undefined,
     bytes_read: usize = 0,
