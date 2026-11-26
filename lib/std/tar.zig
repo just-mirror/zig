@@ -335,22 +335,22 @@ pub const FileKind = enum {
     file,
 };
 
-/// Iterator over entries in the tar file represented by reader.
+/// When using this API, be aware of these common pitfalls:
+/// * Neglecting to detect when the file path of an entry refers to a file system path outside the
+///   extraction root.
+/// * Neglecting to detect when a link target refers to a directory outside the extraction root.
 pub const Iterator = struct {
     reader: *Io.Reader,
 
-    // buffers for heeader and file attributes
-    header_buffer: [Header.SIZE]u8 = undefined,
+    header_buffer: [Header.SIZE]u8,
     file_name_buffer: []u8,
     link_name_buffer: []u8,
 
-    // bytes of padding to the end of the block
-    padding: usize = 0,
-    // not consumed bytes of file from last next iteration
-    unread_file_bytes: u64 = 0,
+    // Bytes of padding to the end of the block.
+    padding: usize,
+    // Number of not yet consumed bytes of file from last next iteration.
+    unread_file_bytes: u64,
 
-    /// Options for iterator.
-    /// Buffers should be provided by the caller.
     pub const Options = struct {
         /// Use a buffer with length `std.fs.max_path_bytes` to match file system capabilities.
         file_name_buffer: []u8,
@@ -358,22 +358,26 @@ pub const Iterator = struct {
         link_name_buffer: []u8,
     };
 
-    /// Iterates over files in tar archive.
-    /// `next` returns each file in tar archive.
     pub fn init(reader: *Io.Reader, options: Options) Iterator {
         return .{
             .reader = reader,
             .file_name_buffer = options.file_name_buffer,
             .link_name_buffer = options.link_name_buffer,
+            .header_buffer = undefined,
+            .padding = 0,
+            .unread_file_bytes = 0,
         };
     }
 
     pub const File = struct {
-        name: []const u8, // name of file, symlink or directory
-        link_name: []const u8, // target name of symlink
-        size: u64 = 0, // size of the file in bytes
+        /// Name of file, symlink, or directory.
+        name: []const u8,
+        /// Target name of symlink.
+        link_name: []const u8,
+        /// Number of bytes in the file.
+        size: u64 = 0,
         mode: u32 = 0,
-        kind: FileKind = .file,
+        kind: FileKind,
     };
 
     const ReadHeaderError = Header.ChecksumError || Io.Reader.Error;
@@ -401,6 +405,7 @@ pub const Iterator = struct {
         return .{
             .name = it.file_name_buffer[0..0],
             .link_name = it.link_name_buffer[0..0],
+            .kind = .file,
         };
     }
 
