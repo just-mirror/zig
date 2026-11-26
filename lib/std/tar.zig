@@ -22,6 +22,7 @@ const Io = std.Io;
 const assert = std.debug.assert;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
+const mem = std.mem;
 
 pub const Writer = @import("tar/Writer.zig");
 
@@ -84,7 +85,7 @@ pub const Diagnostics = struct {
             d.root_dir = try d.allocator.dupe(u8, root_dir);
             return;
         }
-        if (d.root_dir.len == 0 or std.mem.eql(u8, root_dir, d.root_dir))
+        if (d.root_dir.len == 0 or mem.eql(u8, root_dir, d.root_dir))
             return;
         d.allocator.free(d.root_dir);
         d.root_dir = "";
@@ -95,7 +96,7 @@ pub const Diagnostics = struct {
         const start_index: usize = if (path[0] == '/') 1 else 0;
         const end_index: usize = if (path[path.len - 1] == '/') path.len - 1 else path.len;
         const buf = path[start_index..end_index];
-        if (std.mem.findScalarPos(u8, buf, 0, '/')) |idx| {
+        if (mem.findScalarPos(u8, buf, 0, '/')) |idx| {
             return buf[0..idx];
         }
 
@@ -258,7 +259,7 @@ const Header = struct {
         // field are concatenated in big-endian order.
         if (raw[0] == 0x80) {
             if (raw[1] != 0 or raw[2] != 0 or raw[3] != 0) return error.TarNumericValueTooBig;
-            return std.mem.readInt(u64, raw[4..12], .big);
+            return mem.readInt(u64, raw[4..12], .big);
         }
         return try header.octal(start, len);
     }
@@ -269,7 +270,7 @@ const Header = struct {
 
     pub fn is_ustar(header: Header) bool {
         const magic = header.bytes[257..][0..6];
-        return std.mem.eql(u8, magic[0..5], "ustar") and (magic[5] == 0 or magic[5] == ' ');
+        return mem.eql(u8, magic[0..5], "ustar") and (magic[5] == 0 or magic[5] == ' ');
     }
 
     pub fn prefix(header: Header) []const u8 {
@@ -292,8 +293,8 @@ const Header = struct {
         const raw = header.bytes[start..][0..len];
         // Zero-filled octal number in ASCII. Each numeric field of width w
         // contains w minus 1 digits, and a null
-        const ltrimmed = std.mem.trimStart(u8, raw, "0 ");
-        const rtrimmed = std.mem.trimEnd(u8, ltrimmed, " \x00");
+        const ltrimmed = mem.trimStart(u8, raw, "0 ");
+        const rtrimmed = mem.trimEnd(u8, ltrimmed, " \x00");
         if (rtrimmed.len == 0) return 0;
         return std.fmt.parseInt(u64, rtrimmed, 8) catch return error.TarHeader;
     }
@@ -419,7 +420,7 @@ pub const Iterator = struct {
 
     // Number of padding bytes in the last file block.
     fn blockPadding(size: u64) usize {
-        const block_rounded = std.mem.alignForward(u64, size, Header.SIZE); // size rounded to te block boundary
+        const block_rounded = mem.alignForward(u64, size, Header.SIZE); // size rounded to te block boundary
         return @intCast(block_rounded - size);
     }
 
@@ -642,11 +643,11 @@ pub const PaxIterator = struct {
     }
 
     fn eql(a: []const u8, b: []const u8) bool {
-        return std.mem.eql(u8, a, b);
+        return mem.eql(u8, a, b);
     }
 
     fn hasNull(str: []const u8) bool {
-        return (std.mem.findScalar(u8, str, 0)) != null;
+        return (mem.findScalar(u8, str, 0)) != null;
     }
 
     // Checks that each record ends with new line.
@@ -858,10 +859,10 @@ fn sanitizePath(buffer: []u8, path: []const u8, strip_components: u32) error{Inv
     if (path.len == 0 or path[0] == '/') return error.Invalid;
     var i: usize = 0;
     var c = strip_components;
-    var it = std.mem.tokenizeScalar(u8, path, '/');
+    var it = mem.tokenizeScalar(u8, path, '/');
     while (it.next()) |component| {
-        if (std.mem.eql(u8, component, ".")) continue;
-        if (std.mem.eql(u8, component, "..")) {
+        if (mem.eql(u8, component, ".")) continue;
+        if (mem.eql(u8, component, "..")) {
             if (i == 0) return error.Invalid;
             while (true) {
                 const ends_with_slash = buffer[i - 1] == '/';
@@ -886,21 +887,21 @@ fn sanitizePath(buffer: []u8, path: []const u8, strip_components: u32) error{Inv
 }
 
 fn validateLinkName(file_name: []const u8, link_name: []const u8) error{TarLinkTargetOutsideStrippedPrefix}!void {
-    if (std.mem.startsWith(u8, link_name, "/")) return error.TarLinkTargetOutsideStrippedPrefix;
+    if (mem.startsWith(u8, link_name, "/")) return error.TarLinkTargetOutsideStrippedPrefix;
 
     // Count the number of components of file_name which is where the link starts from.
     var n: usize = 0;
     {
-        var it = std.mem.tokenizeScalar(u8, file_name, '/');
+        var it = mem.tokenizeScalar(u8, file_name, '/');
         while (it.next() != null) n += 1;
         assert(n != 0); // Caught by file path sanitization.
     }
 
-    var it = std.mem.tokenizeScalar(u8, link_name, '/');
+    var it = mem.tokenizeScalar(u8, link_name, '/');
     while (it.next()) |component| {
-        if (std.mem.eql(u8, component, ".")) {
+        if (mem.eql(u8, component, ".")) {
             continue;
-        } else if (std.mem.eql(u8, component, "..")) {
+        } else if (mem.eql(u8, component, "..")) {
             if (n == 1) return error.TarLinkTargetOutsideStrippedPrefix;
             n -= 1;
         } else {
@@ -1367,7 +1368,7 @@ test "extract strip_components" {
 fn normalizePath(bytes: []u8) []u8 {
     const canonical_sep = std.fs.path.sep_posix;
     if (std.fs.path.sep == canonical_sep) return bytes;
-    std.mem.replaceScalar(u8, bytes, std.fs.path.sep, canonical_sep);
+    mem.replaceScalar(u8, bytes, std.fs.path.sep, canonical_sep);
     return bytes;
 }
 
